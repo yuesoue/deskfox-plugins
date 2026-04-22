@@ -1,0 +1,25 @@
+{
+  "baseURL": "https://api.getbot.me/v1",
+  "defaults": {
+    "image_size": "1024x1024",
+    "image_n": 1,
+    "tts_voice": "Cherry",
+    "tts_format": "wav"
+  },
+  "voice_input": {
+    "duration_sec": 30,
+    "language": "zh",
+    "keybind": "ctrl+shift+v"
+  },
+  "output_dirs": {
+    "image": "getbot.me/image",
+    "audio": "getbot.me/audio",
+    "html": "getbot.me/html",
+    "md": "getbot.me/md"
+  },
+  "category_overrides": {
+    "image": [],
+    "tts": [],
+    "asr": []
+  }
+}

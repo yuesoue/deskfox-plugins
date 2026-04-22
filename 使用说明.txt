@@ -1,0 +1,132 @@
+==============================================================
+  getbot.me × OpenCode 插件安装包
+==============================================================
+
+这个插件把 getbot.me 中转接入 OpenCode 桌面 app，装完就多出：
+
+  · 模型选择器里多一个 "getbot" 分组，可直接选 Qwen / GPT /
+    Claude / DeepSeek / GLM / Kimi 等 20+ 个模型对话
+  · 四个斜杠命令：
+      /getbot-image   文生图
+      /getbot-tts     语音合成
+      /getbot-asr     语音识别
+      /getbot-md2html Markdown → A4 打印排版 HTML（需要 PDF 在浏览器里 Ctrl+P 另存）
+  · 快捷键 Ctrl+Shift+V ：录音 30 秒 → 自动转文字写入输入框
+
+--------------------------------------------------------------
+【前置条件】
+--------------------------------------------------------------
+
+1. 已装 OpenCode 桌面 app：https://opencode.ai
+
+2. 已装 Node.js（18 及以上）
+     Windows:  https://nodejs.org 下 LTS 版一路下一步
+     macOS:    brew install node
+     Linux:    sudo apt install nodejs npm  （或用 nvm）
+
+3. 可选：ffmpeg（仅语音合成 / 语音识别 / 语音输入需要）
+     Windows:  winget install Gyan.FFmpeg
+     macOS:    brew install ffmpeg
+     Linux:    sudo apt install ffmpeg
+
+4. 去 https://getbot.me 注册并拿一个 API Key（sk- 开头）
+
+--------------------------------------------------------------
+【安装步骤】
+--------------------------------------------------------------
+
+1. 把整个文件夹解压到任意位置（别删，卸载时还要用）
+
+2. 双击：
+     Windows  →  一键安装.bat
+     macOS    →  install.command
+                （若提示"无法打开"：右键 → 打开，或终端里跑
+                  bash install.command）
+
+3. 弹出窗口会提示：
+     请粘贴 getbot.me API Key：
+   粘贴 sk-xxxxxxxxx 回车即可。
+
+4. 看到 "✅ 安装完成" 就成了。
+
+5. 【重要】完全退出 OpenCode 桌面 app（**托盘图标也要退**），
+    然后重开。不然配置不会生效。
+
+6. 打开 OpenCode → 管理模型 → 滚到底能看到 "getbot" 分组，
+   把你想用的模型开关打开就行。
+
+--------------------------------------------------------------
+【使用示例】
+--------------------------------------------------------------
+
+在 OpenCode 聊天框里：
+
+  /getbot-image 一只戴眼镜的橘猫在键盘上打字，扁平插画风
+    → 等几秒，图片存到你当前项目的 output/getbot/images/ 下
+
+  /getbot-tts 你好这是一段测试
+    → 生成 wav，存到 output/getbot/audio/
+
+  /getbot-asr 录音.m4a
+    → 转录文字存为 录音_转录结果.txt
+
+  /getbot-md2html D:\docs\报告.md
+    → 生成打印排版 HTML，自动弹出浏览器；如需 PDF 按 Ctrl+P → 另存为 PDF
+      （macOS：Cmd+P）输出存到 output/getbot/html/
+
+  Ctrl+Shift+V
+    → 说话 30 秒 → 自动写入输入框
+
+--------------------------------------------------------------
+【卸载】
+--------------------------------------------------------------
+
+双击：
+  Windows  →  一键卸载.bat
+  macOS    →  uninstall.command
+             （若提示"无法打开"：右键 → 打开，或终端里跑
+               bash uninstall.command）
+
+确认提示里输入 y 回车即执行。也可以命令行里跑：
+
+    node install.mjs --uninstall
+
+这会删掉：
+  ~/.config/opencode/plugins/getbot.js
+  ~/.config/opencode/plugins/marked.mjs
+  ~/.config/opencode/command/getbot-*.md
+  ~/.config/opencode/cache/getbot-models*.json
+  ~/.config/opencode/opencode.jsonc 里的 provider.getbot
+
+config/getbot.json 会保留（含用户手调参数），需彻底清就手动删。
+
+--------------------------------------------------------------
+【常见问题】
+--------------------------------------------------------------
+
+Q: 重开 OpenCode 后模型选择器里还是没有 getbot？
+A: 1) 确认托盘里的 OpenCode 也退了（右下角系统托盘）
+   2) 管理模型列表往下滚，它可能在下方
+   3) 打开 ~/.config/opencode/opencode.jsonc，确认里面有
+      "provider": { "getbot": { ... } }，且 disabled_providers
+      里没有 "getbot"
+
+Q: /getbot-image 报 401 / 403 ?
+A: API Key 填错或已失效。重跑一次安装脚本，把新 Key 贴进去。
+
+Q: /getbot-tts 报 "未检测到 ffmpeg" 之类？
+A: TTS 本身不需要 ffmpeg，但音频保存会用。按前置条件装 ffmpeg。
+
+Q: Ctrl+Shift+V 录音没反应？
+A: 检查麦克风权限（macOS：系统设置 → 隐私与安全性 → 麦克风 →
+   允许 OpenCode）。Windows 一般不用特别配。
+
+--------------------------------------------------------------
+【安全说明】
+--------------------------------------------------------------
+
+API Key 明文保存在 ~/.config/opencode/opencode.jsonc 的
+provider.getbot.options.apiKey。该文件在你的个人用户目录，只有
+你和管理员能读。切勿把这个文件传给别人或提交到公共仓库。
+
+更新 Key：再跑一次安装脚本，它会覆盖旧 Key。
