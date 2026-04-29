@@ -108,6 +108,14 @@ export function mapTool(
     return { name: "websearch_web_search_exa", input: mappedInput, executed: false }
   }
 
+  // FORK 2026-04-29 (bug#2) Claude CLI 在 Windows docx 编辑等场景调 "PowerShell" tool;
+  // opencode 不认这个 name → ai-sdk experimental_repairToolCall 改名 "invalid" 报红条.
+  // input 格式 { command, description } 跟 bash 一致, 直接转 bash, executed: true 表示已执行.
+  if (name === "PowerShell") {
+    log.debug("mapping PowerShell to bash", { input })
+    return { name: "bash", input, executed: true }
+  }
+
   // TaskOutput -> bash echo
   if (name === "TaskOutput") {
     if (!input) return { name: "bash", executed: false }
@@ -143,5 +151,8 @@ export function mapTool(
   }
 
   // Unknown tools - treated as provider-executed
+  // FORK 2026-04-29 (bug#2) docx 编辑场景出现 name="invalid" 透传给 opencode 报红条.
+  // 加 warn 诊断, 后续根据 name 实际值决定加进 CLAUDE_INTERNAL_TOOLS 或 OPENCODE_HANDLED_TOOLS.
+  log.warn("unmapped tool fallthrough", { name, input })
   return { name, input, executed: true }
 }

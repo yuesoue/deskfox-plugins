@@ -100,11 +100,13 @@ Now continuing with the current message:
 
   for (const msg of messages) {
     if (msg.role === "user") {
-      if (typeof msg.content === "string") {
+      // FORK: filter empty text blocks to avoid Anthropic 400 cache_control error 2026-04-29
+      // Re-applies upstream commit 2d6f094 which was reverted in 644cad6 without explanation.
+      if (typeof msg.content === "string" && msg.content) {
         content.push({ type: "text", text: msg.content })
       } else if (Array.isArray(msg.content)) {
         for (const part of msg.content as any[]) {
-          if (part.type === "text") {
+          if (part.type === "text" && part.text) {
             content.push({ type: "text", text: part.text })
           } else if (part.type === "tool-result") {
             const p = part as any
@@ -132,13 +134,10 @@ Now continuing with the current message:
   }
 
   if (content.length === 0) {
-    return JSON.stringify({
-      type: "user",
-      message: {
-        role: "user",
-        content: [{ type: "text", text: "" }],
-      },
-    })
+    // FORK 2026-04-29 旧版抛错会在 UI 冒红条 ('prompt has no user content...').
+    // 改成返回空字符串作 sentinel — caller (doStream/doGenerate) 检测到空就走 short-circuit
+    // 路径返回空 stream, 避免给 Claude CLI 写入空 / 占位消息触发 400 或自循环.
+    return ""
   }
 
   return JSON.stringify({

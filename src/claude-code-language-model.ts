@@ -22,6 +22,26 @@ import {
 } from "./session-manager.js"
 import { log } from "./logger.js"
 
+// FORK 2026-04-29 ai-sdk@6 升级了 usage schema (asLanguageModelUsage 期望 nested object,
+// 见 ai/dist/index.js:2526). 旧 flat number 形式 { inputTokens: 0 } 会让 ai-sdk
+// 多轮对话访问 .total 时抛 "undefined is not an object". 所有 usage emit 走此 helper.
+// 旧 totalTokens 字段 v6 不要(ai-sdk 内部用 addTokenCounts 自己算).
+function makeUsage(input?: number, output?: number) {
+  return {
+    inputTokens: {
+      total: input ?? 0,
+      noCache: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+    outputTokens: {
+      total: output ?? 0,
+      text: 0,
+      reasoning: 0,
+    },
+  } as any
+}
+
 export class ClaudeCodeLanguageModel implements LanguageModelV2 {
   readonly specificationVersion = "v2"
   readonly modelId: string
@@ -143,11 +163,7 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
       return {
         content: [{ type: "text", text }] as any,
         finishReason: "stop",
-        usage: {
-          inputTokens: 0,
-          outputTokens: 0,
-          totalTokens: 0,
-        },
+        usage: makeUsage(),
         request: { body: { text: "" } },
         response: {
           id: generateId(),
@@ -174,10 +190,52 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
       deleteActiveProcess(sk)
     }
 
+    // FORK 2026-04-29 同 doStream: 返回 content 包含一个空 text part 而非 [], 防止 opencode 重 poll.
+    const lastMessage = options.prompt[options.prompt.length - 1]
+    if (lastMessage?.role === "assistant") {
+      log.debug("doGenerate short-circuit: prompt ends with assistant")
+      return {
+        content: [{ type: "text", text: "" }] as any,
+        finishReason: "stop",
+        usage: makeUsage(),
+        request: { body: { text: "" } },
+        response: {
+          id: generateId(),
+          timestamp: new Date(),
+          modelId: this.modelId,
+        },
+        providerMetadata: {
+          "claude-code": { synthetic: true, path: "no-new-turn" },
+        },
+        warnings,
+      }
+    }
+
     const hasExistingSession = !!getClaudeSessionId(sk)
     const includeHistoryContext = !hasExistingSession && hasPriorConversation
 
     const userMsg = getClaudeUserMessage(options.prompt, includeHistoryContext)
+
+    // FORK 2026-04-29 (bug#3) message-builder 返回 "" 表示 prompt 没有可发的 user content.
+    // 不能 spawn Claude — 走跟 'prompt ends with assistant' 同样的 silent short-circuit, 避免 UI 红条.
+    if (!userMsg) {
+      log.debug("doGenerate silent: empty user message after message-builder")
+      return {
+        content: [{ type: "text", text: "" }] as any,
+        finishReason: "stop",
+        usage: makeUsage(),
+        request: { body: { text: "" } },
+        response: {
+          id: generateId(),
+          timestamp: new Date(),
+          modelId: this.modelId,
+        },
+        providerMetadata: {
+          "claude-code": { synthetic: true, path: "no-new-turn-empty-msg" },
+        },
+        warnings,
+      }
+    }
 
     // doGenerate always spawns a fresh process, never reuse session ID
     const cliArgs = buildCliArgs({
@@ -396,20 +454,15 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
       } as any)
     }
 
-    const usage: LanguageModelV2Usage = {
-      inputTokens: result.usage?.input_tokens,
-      outputTokens: result.usage?.output_tokens,
-      totalTokens:
-        result.usage?.input_tokens && result.usage?.output_tokens
-          ? result.usage.input_tokens + result.usage.output_tokens
-          : undefined,
-    }
+    const usage: LanguageModelV2Usage = makeUsage(
+      result.usage?.input_tokens,
+      result.usage?.output_tokens,
+    )
 
     return {
       content,
-      finishReason: (result.toolCalls.length > 0
-        ? "tool-calls"
-        : "stop") as LanguageModelV2FinishReason,
+      // FORK 2026-04-29 同 stream 端: 全部 providerExecuted=true 不需 ai-sdk 回灌 tool-result, 永远 "stop".
+      finishReason: "stop" as LanguageModelV2FinishReason,
       usage,
       request: { body: { text: userMsg } },
       response: {
@@ -432,7 +485,12 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     options: Parameters<LanguageModelV2["doStream"]>[0],
   ): Promise<Awaited<ReturnType<LanguageModelV2["doStream"]>>> {
     const warnings: LanguageModelV2CallWarning[] = []
-    const cwd = this.config.cwd ?? process.cwd()
+    // FORK 2026-04-29 (bug#1) cwd 优先级: 当前 opencode 没传 providerOptions['claude-code'].cwd
+    // (诊断 log 确认 providerOptions['claude-code'] 是空对象), 但保留这个优先级 — 一旦上游 opencode
+    // 加了 session.project_root 注入, plugin 不用改一行就自动跟随用户切项目.
+    // raw exe 跑模式下 process.cwd() = release 目录会让 Claude 误判项目位置, 留待 opencode 端改.
+    const providerCwd = (options.providerOptions as any)?.["claude-code"]?.cwd
+    const cwd = providerCwd ?? this.config.cwd ?? process.cwd()
     const cliPath = this.config.cliPath
     const skipPermissions = this.config.skipPermissions !== false
     const scope = this.requestScope(options as any)
@@ -454,11 +512,7 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
           controller.enqueue({
             type: "finish",
             finishReason: "stop",
-            usage: {
-              inputTokens: 0,
-              outputTokens: 0,
-              totalTokens: 0,
-            },
+            usage: makeUsage(),
             providerMetadata: {
               "claude-code": {
                 synthetic: true,
@@ -486,12 +540,81 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
       deleteActiveProcess(sk)
     }
 
+    // FORK 2026-04-29 prompt 末尾是 assistant: opencode 在 turn 结束后还会 polling 调 doStream,
+    // 必须返回"完整空响应" stream 才能让 opencode 状态机认这次 turn 真正结束 (只 stream-start+finish 不够).
+    const lastMessage = options.prompt[options.prompt.length - 1]
+    if (lastMessage?.role === "assistant") {
+      log.debug("doStream short-circuit: prompt ends with assistant")
+      const stream = new ReadableStream<LanguageModelV2StreamPart>({
+        start(controller) {
+          const tid = generateId()
+          controller.enqueue({ type: "stream-start", warnings })
+          controller.enqueue({
+            type: "response-metadata",
+            id: generateId(),
+            timestamp: new Date(),
+            modelId: "sonnet",
+          } as any)
+          controller.enqueue({ type: "text-start", id: tid } as any)
+          controller.enqueue({ type: "text-delta", id: tid, delta: "" } as any)
+          controller.enqueue({ type: "text-end", id: tid })
+          controller.enqueue({
+            type: "finish",
+            finishReason: "stop",
+            usage: makeUsage(),
+            providerMetadata: {
+              "claude-code": { synthetic: true, path: "no-new-turn" },
+            },
+          })
+          controller.close()
+        },
+      })
+      return {
+        stream,
+        request: { body: { text: "" } },
+      }
+    }
+
     const hasExistingSession = !!getClaudeSessionId(sk)
     const hasActiveProcess = !!getActiveProcess(sk)
     const includeHistoryContext =
       !hasExistingSession && !hasActiveProcess && hasPriorConversation
 
     const userMsg = getClaudeUserMessage(options.prompt, includeHistoryContext)
+
+    // FORK 2026-04-29 (bug#3) 同 doGenerate: 空 userMsg 走 silent short-circuit, 避免 UI 红条.
+    if (!userMsg) {
+      log.debug("doStream silent: empty user message after message-builder")
+      const tid = generateId()
+      const modelIdSnapshot = this.modelId
+      const stream = new ReadableStream<LanguageModelV2StreamPart>({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings })
+          controller.enqueue({
+            type: "response-metadata",
+            id: generateId(),
+            timestamp: new Date(),
+            modelId: modelIdSnapshot,
+          } as any)
+          controller.enqueue({ type: "text-start", id: tid } as any)
+          controller.enqueue({ type: "text-delta", id: tid, delta: "" } as any)
+          controller.enqueue({ type: "text-end", id: tid })
+          controller.enqueue({
+            type: "finish",
+            finishReason: "stop",
+            usage: makeUsage(),
+            providerMetadata: {
+              "claude-code": { synthetic: true, path: "no-new-turn-empty-msg" },
+            },
+          })
+          controller.close()
+        },
+      })
+      return {
+        stream,
+        request: { body: { text: "" } },
+      }
+    }
 
     log.info("doStream starting", {
       cwd,
@@ -506,6 +629,9 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
       skipPermissions,
       model: this.modelId,
     })
+
+    // FORK 2026-04-29 capture 给 stream callback 用 (callback 内 `this` 不是 class 实例)
+    const capturedModelId = this.modelId
 
     const stream = new ReadableStream<LanguageModelV2StreamPart>({
       start(controller) {
@@ -524,6 +650,14 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
         }
 
         controller.enqueue({ type: "stream-start", warnings })
+        // FORK 2026-04-29 必须 emit response-metadata, 否则 opencode 收不到 message id/finish 字段,
+        // step loop break 条件 (lastAssistant?.finish truthy) 永远失败 → 无限 polling.
+        controller.enqueue({
+          type: "response-metadata",
+          id: generateId(),
+          timestamp: new Date(),
+          modelId: capturedModelId,
+        } as any)
 
         const textId = generateId()
         let textStarted = false
@@ -995,18 +1129,11 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
 
               controller.enqueue({
                 type: "finish",
-                finishReason:
-                  toolCallMap.size > 0 ? "tool-calls" : "stop",
-                usage: {
-                  inputTokens: msg.usage?.input_tokens,
-                  outputTokens: msg.usage?.output_tokens,
-                  totalTokens:
-                    msg.usage?.input_tokens &&
-                    msg.usage?.output_tokens
-                      ? msg.usage.input_tokens +
-                        msg.usage.output_tokens
-                      : undefined,
-                },
+                // FORK 2026-04-29 永远 "stop": 所有 tool-call 都 providerExecuted=true,
+                // Claude CLI 内部已执行完, ai-sdk 不需要回灌 tool-result.
+                // 标 "tool-calls" 会让 ai-sdk 误以为要继续工具循环, 又调 doStream 触发"思考中"卡死.
+                finishReason: "stop",
+                usage: makeUsage(msg.usage?.input_tokens, msg.usage?.output_tokens),
                 providerMetadata: {
                   "claude-code": resultMeta,
                 },
@@ -1040,11 +1167,7 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
           controller.enqueue({
             type: "finish",
             finishReason: "stop",
-            usage: {
-              inputTokens: undefined,
-              outputTokens: undefined,
-              totalTokens: undefined,
-            },
+            usage: makeUsage(),
             providerMetadata: {
               "claude-code": resultMeta,
             },
