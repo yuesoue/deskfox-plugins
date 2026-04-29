@@ -485,11 +485,11 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     options: Parameters<LanguageModelV2["doStream"]>[0],
   ): Promise<Awaited<ReturnType<LanguageModelV2["doStream"]>>> {
     const warnings: LanguageModelV2CallWarning[] = []
-    // FORK 2026-04-29 (bug#1) cwd 优先级: 当前 opencode 没传 providerOptions['claude-code'].cwd
-    // (诊断 log 确认 providerOptions['claude-code'] 是空对象), 但保留这个优先级 — 一旦上游 opencode
-    // 加了 session.project_root 注入, plugin 不用改一行就自动跟随用户切项目.
-    // raw exe 跑模式下 process.cwd() = release 目录会让 Claude 误判项目位置, 留待 opencode 端改.
-    const providerCwd = (options.providerOptions as any)?.["claude-code"]?.cwd
+    // FORK 2026-04-29 (bug#1) cwd 优先级: 从 deskfox-fork 注入的 _opencode 通用 namespace 取项目目录.
+    // 配套 deskfox-fork commit 41817499d (feat: plugin-cwd-channel), opencode 在 streamText
+    // providerOptions 里加 _opencode.cwd = Instance.directory, 让所有 spawn-based plugin 共用此协议.
+    // 优先级: _opencode.cwd > config.cwd > process.cwd() (process.cwd() 是 sidecar 启动目录, 不跟随用户切项目).
+    const providerCwd = (options.providerOptions as any)?._opencode?.cwd
     const cwd = providerCwd ?? this.config.cwd ?? process.cwd()
     const cliPath = this.config.cliPath
     const skipPermissions = this.config.skipPermissions !== false

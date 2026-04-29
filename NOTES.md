@@ -34,7 +34,7 @@ archived → 上游不会再有 commit。所有维护我们自己来。
 - **silent short-circuit "prompt ends with assistant"** — opencode step loop 即便上游修了仍会有 polling 余震,plugin 检测 prompt 末尾是 assistant 直接返回完整空 stream
 - **silent short-circuit "empty user message"** — message-builder 返回 sentinel "" 时同上,跟 above 路径合并
 - **usage schema → ai-sdk@6 nested** — 7 处 emit 全走 `makeUsage(input?, output?)` helper,改 `{inputTokens: {total, noCache, cacheRead, cacheWrite}, outputTokens: {total, text, reasoning}}`,移除 `totalTokens` 字段。旧 flat number 形式在 ai-sdk@6 多轮对话会抛 `undefined is not an object (evaluating $.inputTokens.total)`
-- **cwd 优先级防御** — `options.providerOptions?.["claude-code"]?.cwd ?? this.config.cwd ?? process.cwd()`。当前 opencode 没传 `providerOptions["claude-code"].cwd`(空对象),plugin 等待上游配合,不会破坏现状。详见 §6
+- **cwd 优先级 — 接 deskfox-fork `_opencode` 通用 namespace** — `options.providerOptions?._opencode?.cwd ?? this.config.cwd ?? process.cwd()`。配套 deskfox-fork commit `41817499d`(feat: plugin-cwd-channel),opencode 在 streamText 注入 `_opencode.cwd = Instance.directory`,让所有 spawn-based plugin(claude-code/codex/gemini/aider)共用此协议
 
 ### 3.3 `src/tool-mapping.ts`
 
@@ -76,10 +76,14 @@ Windows 用户一键装。流程:
 不在本仓内,记录指针便于追溯:
 
 - **opencode step loop 不 break** — `D:\project\opencode-fork\packages\opencode\src\session\prompt.ts` 加 hasStepFinish 兜底块,commit `e2a9d7167`,文档 `docs/features/claude-code-loop-fix/`。**此 fix 不依赖 plugin,plugin 哪怕全删 fork 改动只剩原版,opencode 这边 step loop 也修了**
+- **opencode 注入 `_opencode.cwd` 给 spawn 类 plugin** — `D:\project\opencode-fork\packages\opencode\src\session\llm.ts` 在 streamText `providerOptions` 里加 `_opencode = { cwd: Instance.directory, project: Instance.project.id }`,commit `41817499d`,文档 `docs/features/plugin-cwd-channel/`。**plugin 配套读取 `options.providerOptions._opencode.cwd`,两端齐备 → user 切项目时 Claude 看到正确 cwd**
 
 ## 6. 已知 TODO
 
-- **Bug #1 真修(cwd 注入)** — 工单 `HANDOFF-deskfox-fork-2-cwd.md` 已交,等 deskfox-fork agent 在 `llm.ts` 的 streamText 调用注入 `providerOptions["claude-code"].cwd`。plugin 侧已就位,opencode 改完一行不用动 plugin
+(暂无遗留)
+
+### 已关闭
+- ~~Bug #1 真修(cwd 注入)~~ — 2026-04-29 完成。工单 `HANDOFF-deskfox-fork-2-cwd.md` 接手, deskfox-fork commit `41817499d` 用更通用的 `_opencode` namespace 注入(覆盖所有 spawn 类 plugin),plugin 配套接 commit `<本笔>`。两端齐备,user 切项目时 Claude 跟随。注:实际命名比工单建议的 `claude-code` namespace 更通用,deskfox-fork agent 优化了设计
 
 ## 7. 工程约定
 
@@ -92,6 +96,7 @@ Windows 用户一键装。流程:
 
 按时间倒序:
 
+- 2026-04-29 cwd 接 `_opencode` namespace(配套 deskfox-fork `41817499d`),Bug #1 闭环
 - 2026-04-29 install.ps1 + .bat 自动探测 + 配置写入 + 探测 native installer 路径
 - 2026-04-29 4 个独立 bug fix(usage schema / silent return / PowerShell mapping / cwd 防御性)
 - 2026-04-29 emit response-metadata + finishReason "stop" + silent short-circuit(开始未直接解,后由 opencode-fork 的 step loop fix 配合解决)
