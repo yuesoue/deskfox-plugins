@@ -1,3 +1,5 @@
-dist/
+dist/*.map
 node_modules/
 opencode/
+pnpm-lock.yaml
+yarn.lock
