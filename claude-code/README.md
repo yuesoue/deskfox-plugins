@@ -23,6 +23,33 @@ DeskFox 本体也得已经装好(本仓只是 plugin)。
    - 合并写入 `claude-code` provider 节(**不动你其他 provider 配置**)
 3. **完全退出 DeskFox 然后重启**(任务栏右键 → 退出,确保 sidecar `opencode-cli.exe` 也关掉)
 
+## 安装(macOS / Linux)
+
+**macOS 推荐:Finder 里双击 `install.command`**(会用 Terminal 打开并执行,跑完窗口保留方便看输出)。
+
+命令行用户(或 Linux)直接跑:
+
+```bash
+cd /path/to/deskfox-plugins/claude-code
+./install.sh
+```
+
+> `install.command` 只是双击友好的包装器,内部还是调 `install.sh`,逻辑完全一致。
+> 如果是第一次从仓库拉下来双击没反应,可能是 macOS 给文件加了隔离属性,在该目录跑一次:
+> `chmod +x install.command install.sh && xattr -d com.apple.quarantine install.command 2>/dev/null; true`
+
+脚本自动:
+
+- 检测 `dist/index.js`,缺失时按 `bun → pnpm → npm` 顺序选一个可用的自动 `install && run build`
+- 探测 `claude` 可执行文件,顺序遍历:`PATH` → `~/.local/bin/claude`(Anthropic 官方安装器默认位置)→ `/opt/homebrew/bin/claude`(Apple Silicon brew)→ `/usr/local/bin/claude`(Intel brew / 系统级 npm)→ `~/.bun/bin/claude` → `~/.volta/bin/claude` → `~/.npm-global/bin/claude` → yarn / pnpm global → 当前激活的 `nvm`/`fnm`
+- 找不到时让你手输完整路径(支持 `~` 展开,循环到正确为止)
+- 备份现有 `~/.config/opencode/opencode.jsonc` 为 `.bak.<时间戳>`
+- 合并写入 `claude-code` provider 节(**不动你其他 provider 配置**)
+
+完成后 **完全退出 DeskFox 再启动**:macOS 用 `Cmd+Q`,如果担心 sidecar 没退,跑 `pkill -f opencode-cli` 兜底。
+
+> 已有 config 含 `// JSONC 注释` 时 Node 内置 `JSON.parse` 解析不了,脚本会备份原文件并打印一段可直接粘贴的 `"claude-code": { ... }` snippet 让你手动合并,不会覆盖你的配置。
+
 ## 使用
 
 打开 DeskFox → 模型选择器 → 选 **Claude Code (订阅)** 下三个模型之一:
@@ -37,22 +64,22 @@ DeskFox 本体也得已经装好(本仓只是 plugin)。
 
 不提供自动 uninstall。手动两步:
 
-1. 编辑 `C:\Users\<your-name>\.config\opencode\opencode.jsonc`,删除 `provider` 对象里整个 `"claude-code": { ... }` 节(注意保持其余 provider 完整)
-2. 删本目录 `D:\project\deskfox-plugins\claude-code`(可选,不删也无害,只是占盘)
+1. 编辑 `~/.config/opencode/opencode.jsonc`(Windows: `C:\Users\<you>\.config\opencode\opencode.jsonc`),删除 `provider` 对象里整个 `"claude-code": { ... }` 节(注意保持其余 provider 完整)
+2. 删本插件目录(可选,不删也无害,只是占盘)
 
 如果想恢复 install 之前的配置,直接重命名最新一个 `opencode.jsonc.bak.<时间戳>` 回 `opencode.jsonc` 即可。
 
 ## 重新安装 / 换 Claude Code 路径
 
-直接重跑 `install.bat`。脚本会重新探测 + 自动备份 + 合并写入,跟首次安装等价。
+直接重跑 `install.bat`(Windows)或双击 `install.command` / 命令行 `install.sh`(macOS/Linux)。脚本会重新探测 + 自动备份 + 合并写入,跟首次安装等价。
 
 ## 排错
 
 ### 启动 DeskFox 后模型选择器看不到 "Claude Code (订阅)"
 
-1. 检查 `C:\Users\<your-name>\.config\opencode\opencode.jsonc` 里有没有 `"claude-code"` 节(install 应该写入了)
-2. 检查 `provider.claude-code.npm` 字段是不是 `file:///D:/project/deskfox-plugins/claude-code/dist/index.js`,且这个文件存在
-3. **完全退出 DeskFox 重启**(很多时候只是 sidecar 没刷新)
+1. 检查 `~/.config/opencode/opencode.jsonc`(Windows: `C:\Users\<you>\.config\opencode\opencode.jsonc`)里有没有 `"claude-code"` 节(install 应该写入了)
+2. 检查 `provider.claude-code.npm` 字段指向的 `file://.../dist/index.js` 文件确实存在
+3. **完全退出 DeskFox 重启**(很多时候只是 sidecar 没刷新;macOS 用 `pkill -f opencode-cli`,Windows 任务栏右键退出)
 
 ### 选了 Claude 模型,发消息后"思考中"卡死永远不停
 
@@ -62,17 +89,33 @@ DeskFox 本体也得已经装好(本仓只是 plugin)。
 
 理论上 plugin 已经修了 `PowerShell` → `bash` 的映射。如果还出现,说明 Claude CLI 又调了一个我们没映射的 tool name。
 
-诊断:开 DEBUG 看 plugin 调了什么:
+诊断:开 DEBUG 看 plugin 调了什么。
+
+Windows (PowerShell):
 
 ```powershell
 [Environment]::SetEnvironmentVariable("DEBUG", "opencode-claude-code", "User")
 # 重启 DeskFox 复现问题
 ```
 
-然后看 `D:\project\deskfox-plugins\claude-code\debug.log` 里的 `unmapped tool fallthrough` 行,把 name 报告给开发者。诊断完关掉 DEBUG:
+macOS / Linux:
+
+```bash
+launchctl setenv DEBUG opencode-claude-code   # macOS GUI 启动的 DeskFox
+# 或 export DEBUG=opencode-claude-code 后从同一终端启动 DeskFox
+# 重启 DeskFox 复现问题
+```
+
+然后看插件目录下 `debug.log` 里的 `unmapped tool fallthrough` 行,把 name 报告给开发者。诊断完关掉:
 
 ```powershell
+# Windows
 [Environment]::SetEnvironmentVariable("DEBUG", $null, "User")
+```
+
+```bash
+# macOS
+launchctl unsetenv DEBUG
 ```
 
 ### Claude 答错"我在哪个项目里"
@@ -91,7 +134,9 @@ DeskFox 本体也得已经装好(本仓只是 plugin)。
 
 | 文件 | 用途 |
 |---|---|
-| `install.bat` / `install.ps1` | 安装入口(用户) |
+| `install.bat` / `install.ps1` | 安装入口(Windows) |
+| `install.command` | 安装入口(macOS,Finder 双击专用,内部调 `install.sh`) |
+| `install.sh` | 安装入口(macOS / Linux 命令行) |
 | `dist/index.js` | plugin 编译产物(DeskFox 加载这个) |
 | `src/` | plugin 源码 |
 | `package.json` / `tsup.config.ts` / `bun.lock` | 构建配置 |
@@ -103,7 +148,7 @@ DeskFox 本体也得已经装好(本仓只是 plugin)。
 ## 开发(只有需要改 plugin 源码时看)
 
 ```bash
-cd D:\project\deskfox-plugins\claude-code
+cd /path/to/deskfox-plugins/claude-code   # Windows: D:\project\deskfox-plugins\claude-code
 bun install
 bun run build      # 出 dist/index.js
 bun run dev        # watch 模式
