@@ -60,6 +60,18 @@ cd /path/to/deskfox-plugins/claude-code
 
 正常聊天 / 工具调用(读文件、跑 bash、改代码)都支持。
 
+### 图片 / 截图输入(2026-05-13 起支持)
+
+聊天输入框支持把截图作为附件发给 Claude:
+
+- **Ctrl+V** 直接粘贴剪贴板里的图片
+- 点输入框旁的 **📎 附件按钮** 选本机 PNG/JPG
+- 从文件管理器**拖拽**图片进聊天框
+
+三种方式都会显示缩略图,然后跟正常消息一起发出。三个模型都支持图像识别(Sonnet/Opus/Haiku 全部 vision-enabled)。
+
+> 如果之前装过老版本 plugin,模型可能回复"当前模型不支持图片输入" — 说明你的 `opencode.jsonc` 里 `claude-code` 节没有 `modalities` 字段(老 install 写的)。**重跑一次 `install.bat` / `install.sh` 即可修复**(脚本会自动补字段并备份原配置)。
+
 ## 卸载
 
 不提供自动 uninstall。手动两步:
@@ -80,6 +92,12 @@ cd /path/to/deskfox-plugins/claude-code
 1. 检查 `~/.config/opencode/opencode.jsonc`(Windows: `C:\Users\<you>\.config\opencode\opencode.jsonc`)里有没有 `"claude-code"` 节(install 应该写入了)
 2. 检查 `provider.claude-code.npm` 字段指向的 `file://.../dist/index.js` 文件确实存在
 3. **完全退出 DeskFox 重启**(很多时候只是 sidecar 没刷新;macOS 用 `pkill -f opencode-cli`,Windows 任务栏右键退出)
+
+### 传截图后模型回复"不支持图片输入"
+
+`opencode.jsonc` 里 `claude-code` 节的 model 配置缺 `modalities` 字段(老版 install 脚本写的配置没有这个)。opencode 运行时凭这个字段判断要不要把图片转发给 plugin,缺字段就直接拦下、塞个"模型不支持"的假错误给 Claude。
+
+**修复**:重跑 `install.bat`(Windows)/ `install.sh`(macOS/Linux),脚本会自动补 `modalities:{input:["text","image"],output:["text"]}` + `attachment:true`。重跑会备份原 config,**不会覆盖你其他 provider 的配置**。然后**完全退出 DeskFox 重启**生效。
 
 ### 选了 Claude 模型,发消息后"思考中"卡死永远不停
 
