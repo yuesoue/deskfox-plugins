@@ -165,17 +165,20 @@ const provider = {
   models: {
     sonnet: {
       name: "Claude Sonnet (via Claude Code)",
-      attachment: false, reasoning: true, tool_call: true,
+      attachment: true, reasoning: true, tool_call: true,
+      modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 1000000, output: 16384 },
     },
     opus: {
       name: "Claude Opus (via Claude Code)",
-      attachment: false, reasoning: true, tool_call: true,
+      attachment: true, reasoning: true, tool_call: true,
+      modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 1000000, output: 16384 },
     },
     haiku: {
       name: "Claude Haiku (via Claude Code)",
-      attachment: false, reasoning: false, tool_call: true,
+      attachment: true, reasoning: false, tool_call: true,
+      modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 200000, output: 8192 },
     },
   },

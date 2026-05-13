@@ -172,6 +172,41 @@ function mapTool(name, input) {
 }
 
 // src/message-builder.ts
+function toClaudeImageSource(data, mediaType) {
+  if (data instanceof Uint8Array) {
+    return {
+      type: "base64",
+      media_type: mediaType,
+      data: Buffer.from(data).toString("base64")
+    };
+  }
+  if (data instanceof URL) {
+    return { type: "url", url: data.toString() };
+  }
+  if (typeof data === "string") {
+    if (data.startsWith("data:")) {
+      const comma = data.indexOf(",");
+      if (comma > 0) {
+        const header = data.slice(5, comma);
+        const isBase64 = header.endsWith(";base64");
+        const mt = (isBase64 ? header.slice(0, -7) : header) || mediaType;
+        const payload = data.slice(comma + 1);
+        return {
+          type: "base64",
+          media_type: mt,
+          // 非 base64 (即 url-encoded plain text) 的图片 data URL 几乎不存在, 这里仍走 base64 通道,
+          // Claude 端校验失败再 fallback 处理.
+          data: isBase64 ? payload : Buffer.from(decodeURIComponent(payload)).toString("base64")
+        };
+      }
+    }
+    if (data.startsWith("http://") || data.startsWith("https://")) {
+      return { type: "url", url: data };
+    }
+    return { type: "base64", media_type: mediaType, data };
+  }
+  return null;
+}
 function compactConversationHistory(prompt) {
   const conversationMessages = prompt.filter(
     (m) => m.role === "user" || m.role === "assistant"
@@ -250,6 +285,24 @@ Now continuing with the current message:
         for (const part of msg.content) {
           if (part.type === "text" && part.text) {
             content.push({ type: "text", text: part.text });
+          } else if (part.type === "file") {
+            const mediaType = part.mediaType;
+            if (!mediaType || !mediaType.startsWith("image/")) {
+              log.warn("skipping non-image file part in user message", {
+                mediaType
+              });
+              continue;
+            }
+            const concreteMediaType = mediaType === "image/*" ? "image/png" : mediaType;
+            const source = toClaudeImageSource(part.data, concreteMediaType);
+            if (source) {
+              content.push({ type: "image", source });
+            } else {
+              log.warn("could not encode image part \u2014 dropped", {
+                mediaType,
+                dataType: typeof part.data
+              });
+            }
           } else if (part.type === "tool-result") {
             const p = part;
             let resultText = "";

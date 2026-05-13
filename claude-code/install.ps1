@@ -105,23 +105,26 @@ $claudeCodeProvider = [PSCustomObject]@{
   models = [PSCustomObject]@{
     sonnet = [PSCustomObject]@{
       name = "Claude Sonnet (via Claude Code)"
-      attachment = $false
+      attachment = $true
       reasoning = $true
       tool_call = $true
+      modalities = [PSCustomObject]@{ input = @("text", "image"); output = @("text") }
       limit = [PSCustomObject]@{ context = 1000000; output = 16384 }
     }
     opus = [PSCustomObject]@{
       name = "Claude Opus (via Claude Code)"
-      attachment = $false
+      attachment = $true
       reasoning = $true
       tool_call = $true
+      modalities = [PSCustomObject]@{ input = @("text", "image"); output = @("text") }
       limit = [PSCustomObject]@{ context = 1000000; output = 16384 }
     }
     haiku = [PSCustomObject]@{
       name = "Claude Haiku (via Claude Code)"
-      attachment = $false
+      attachment = $true
       reasoning = $false
       tool_call = $true
+      modalities = [PSCustomObject]@{ input = @("text", "image"); output = @("text") }
       limit = [PSCustomObject]@{ context = 200000; output = 8192 }
     }
   }

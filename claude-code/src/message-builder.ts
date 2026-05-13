@@ -3,6 +3,52 @@ import { log } from "./logger.js"
 
 type Prompt = Parameters<LanguageModelV2["doGenerate"]>[0]["prompt"]
 
+type ClaudeImageSource =
+  | { type: "base64"; media_type: string; data: string }
+  | { type: "url"; url: string }
+
+// AI SDK v2 file part 的 data 字段是 Uint8Array | string | URL.
+// Claude stream-json 的 image block source 支持 base64 / url 两种, 这里做兜底转换.
+function toClaudeImageSource(
+  data: unknown,
+  mediaType: string,
+): ClaudeImageSource | null {
+  if (data instanceof Uint8Array) {
+    return {
+      type: "base64",
+      media_type: mediaType,
+      data: Buffer.from(data).toString("base64"),
+    }
+  }
+  if (data instanceof URL) {
+    return { type: "url", url: data.toString() }
+  }
+  if (typeof data === "string") {
+    if (data.startsWith("data:")) {
+      const comma = data.indexOf(",")
+      if (comma > 0) {
+        const header = data.slice(5, comma) // 去掉 "data:"
+        const isBase64 = header.endsWith(";base64")
+        const mt = (isBase64 ? header.slice(0, -7) : header) || mediaType
+        const payload = data.slice(comma + 1)
+        return {
+          type: "base64",
+          media_type: mt,
+          // 非 base64 (即 url-encoded plain text) 的图片 data URL 几乎不存在, 这里仍走 base64 通道,
+          // Claude 端校验失败再 fallback 处理.
+          data: isBase64 ? payload : Buffer.from(decodeURIComponent(payload)).toString("base64"),
+        }
+      }
+    }
+    if (data.startsWith("http://") || data.startsWith("https://")) {
+      return { type: "url", url: data }
+    }
+    // 兜底: 假设已经是 base64.
+    return { type: "base64", media_type: mediaType, data }
+  }
+  return null
+}
+
 /**
  * Compact conversation history into a context summary for when we start
  * a fresh Claude CLI session but want to preserve conversation context.
@@ -108,6 +154,26 @@ Now continuing with the current message:
         for (const part of msg.content as any[]) {
           if (part.type === "text" && part.text) {
             content.push({ type: "text", text: part.text })
+          } else if (part.type === "file") {
+            const mediaType: string | undefined = part.mediaType
+            if (!mediaType || !mediaType.startsWith("image/")) {
+              log.warn("skipping non-image file part in user message", {
+                mediaType,
+              })
+              continue
+            }
+            // 通配 image/* 没法当具体 media_type 用, 退回 image/png 作为最常见选择.
+            const concreteMediaType =
+              mediaType === "image/*" ? "image/png" : mediaType
+            const source = toClaudeImageSource(part.data, concreteMediaType)
+            if (source) {
+              content.push({ type: "image", source })
+            } else {
+              log.warn("could not encode image part — dropped", {
+                mediaType,
+                dataType: typeof part.data,
+              })
+            }
           } else if (part.type === "tool-result") {
             const p = part as any
             let resultText = ""
