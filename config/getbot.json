@@ -20,6 +20,7 @@
   "category_overrides": {
     "image": [],
     "tts": [],
-    "asr": []
+    "asr": [],
+    "translate": []
   }
 }

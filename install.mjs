@@ -4,7 +4,7 @@
  *
  * 默认安装到 OpenCode 全局目录：~/.config/opencode/
  *   - plugins/getbot.js + plugins/marked.mjs
- *   - command/getbot-{image,tts,asr,md2html}.md
+ *   - command/getbot-{image,tts,asr,translate,md2html}.md
  *   - config/getbot.json
  *   - config/getbot-secret.json（apiKey + baseURL，独立保存，不写主配置）
  *   - cache/getbot-models.json
@@ -31,15 +31,19 @@ const GLOBAL_DIR = join(homedir(), ".config", "opencode");
 const DEFAULT_BASE_URL = "https://api.getbot.me/v1";
 
 // ========== 分类规则（与 setup-getbot.mjs 保持一致）==========
+// translate 必须排在 asr 前面：qwen3-livetranslate-* 含 "translate" 也含 "live"，
+// 但它本质是流式 ASR+翻译；这里专门匹配 qwen-mt-* 这类纯文本翻译模型
 const CLASSIFY_RULES = [
   { cat: "image", re: /image|flux|sd-?xl|sd-?[0-9]|dall-?e|\bmj\b|midjourney|ideogram|stable-diffusion|playground-v/i },
   { cat: "tts", re: /^(?!.*realtime).*((^|[-_\/])tts([-_]|$)|(^|[-_\/])speech([-_\/]|$)|cosyvoice|sambert)/i },
+  { cat: "translate", re: /(^|[-_])mt([-_]|$)/i },
   { cat: "asr", re: /^(?!.*realtime).*(whisper|(^|[-_])asr([-_]|$)|(^|[-_])omni([-_]|$)|livetranslate)/i },
 ];
 const BUCKET_PRIORITY = {
   image: (id) => (/z-image-turbo/i.test(id) ? 3 : 0) + (/\bpro\b/i.test(id) ? 2 : 0) + (/edit/i.test(id) ? -1 : 0),
   tts: (id) => (/(^|[-_\/])tts/i.test(id) ? 3 : 0) + (/hd/i.test(id) ? 2 : /turbo/i.test(id) ? 1 : 0),
   asr: (id) => (/(^|[-_])omni/i.test(id) ? 3 : 0) + (/whisper/i.test(id) ? 2 : 0) + (/livetranslate/i.test(id) ? -1 : 0),
+  translate: (id) => (/turbo/i.test(id) ? 2 : 0) + (/\bplus\b/i.test(id) ? 1 : 0),
 };
 
 // ========== 日志工具 ==========
@@ -112,7 +116,7 @@ function extractModelIds(raw) {
 }
 
 function classify(ids) {
-  const buckets = { image: [], tts: [], asr: [], chat: [] };
+  const buckets = { image: [], tts: [], asr: [], translate: [], chat: [] };
   for (const id of ids) {
     let matched = false;
     for (const { cat, re } of CLASSIFY_RULES) {
@@ -178,6 +182,7 @@ function writeCache(buckets, raw) {
     image: buckets.image[0] || null,
     tts: buckets.tts[0] || null,
     asr: buckets.asr[0] || null,
+    translate: buckets.translate[0] || null,
   };
   writeFileSync(join(cacheDir, "getbot-models.json"), JSON.stringify({
     fetched_at: Date.now(),
@@ -199,6 +204,7 @@ async function confirmUninstall() {
     join(GLOBAL_DIR, "command", "getbot-image.md"),
     join(GLOBAL_DIR, "command", "getbot-tts.md"),
     join(GLOBAL_DIR, "command", "getbot-asr.md"),
+    join(GLOBAL_DIR, "command", "getbot-translate.md"),
     join(GLOBAL_DIR, "command", "getbot-md2html.md"),
     join(GLOBAL_DIR, "cache", "getbot-models.json"),
     join(GLOBAL_DIR, "cache", "getbot-models.raw.json"),
@@ -243,6 +249,7 @@ async function uninstall() {
     join(GLOBAL_DIR, "command", "getbot-image.md"),
     join(GLOBAL_DIR, "command", "getbot-tts.md"),
     join(GLOBAL_DIR, "command", "getbot-asr.md"),
+    join(GLOBAL_DIR, "command", "getbot-translate.md"),
     join(GLOBAL_DIR, "command", "getbot-md2html.md"),
     join(GLOBAL_DIR, "cache", "getbot-models.json"),
     join(GLOBAL_DIR, "cache", "getbot-models.raw.json"),
@@ -290,13 +297,13 @@ async function main() {
   let ids;
   try { ids = extractModelIds(raw); } catch (e) { die(e.message); }
   const buckets = classify(ids);
-  log(`✓ 共 ${ids.length} 个模型：chat×${buckets.chat.length}  image×${buckets.image.length}  tts×${buckets.tts.length}  asr×${buckets.asr.length}`);
+  log(`✓ 共 ${ids.length} 个模型：chat×${buckets.chat.length}  image×${buckets.image.length}  tts×${buckets.tts.length}  asr×${buckets.asr.length}  translate×${buckets.translate.length}`);
 
   // 4. 复制插件、命令、config
   log("→ 复制插件到 " + GLOBAL_DIR + " ...");
   const filesResult = installFiles();
   log(`✓ plugins/getbot.js 已安装`);
-  log(`✓ 命令文件 ${filesResult.commands} 个（/getbot-image /getbot-tts /getbot-asr /getbot-md2html）`);
+  log(`✓ 命令文件 ${filesResult.commands} 个（/getbot-image /getbot-tts /getbot-asr /getbot-translate /getbot-md2html）`);
   log(filesResult.config === 1 ? "✓ config/getbot.json 已写入默认配置" : "  config/getbot.json 已存在，保留用户配置");
 
   // 5. 写 secret 文件（apiKey + baseURL，独立保存，不写主配置）
@@ -317,11 +324,12 @@ async function main() {
   log("  ✅ 安装完成");
   log("==============================================================");
   log("");
-  log("已注册 4 个斜杠命令（在 OpenCode 聊天窗输入 / 查看）：");
-  log(`  /getbot-image   文生图    默认模型 → ${toolDefaults.image || "（无可用模型）"}`);
-  log(`  /getbot-tts     语音合成  默认模型 → ${toolDefaults.tts || "（无可用模型）"}`);
-  log(`  /getbot-asr     语音识别  默认模型 → ${toolDefaults.asr || "（无可用模型）"}`);
-  log(`  /getbot-md2html MD 转打印排版 HTML（需要 PDF 在浏览器里 Ctrl+P 另存，无需模型）`);
+  log("已注册 5 个斜杠命令（在 OpenCode 聊天窗输入 / 查看）：");
+  log(`  /getbot-image     文生图    默认模型 → ${toolDefaults.image || "（无可用模型）"}`);
+  log(`  /getbot-tts       语音合成  默认模型 → ${toolDefaults.tts || "（无可用模型）"}`);
+  log(`  /getbot-asr       语音识别  默认模型 → ${toolDefaults.asr || "（无可用模型）"}`);
+  log(`  /getbot-translate 中英互译  默认模型 → ${toolDefaults.translate || "（无可用模型）"}`);
+  log(`  /getbot-md2html   MD 转打印排版 HTML（需要 PDF 在浏览器里 Ctrl+P 另存，无需模型）`);
   log("快捷键：Ctrl+Shift+V → 录音 30s → 自动转文字插入输入框");
   log("");
 

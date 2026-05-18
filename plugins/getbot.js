@@ -188,6 +188,35 @@ async function compactAudioForAsr(inputPath, tmpDir) {
   return { path: out, created: true };
 }
 
+// 语言名归一化：zh / 中文 / chinese → Chinese；en / 英文 / english → English
+function normalizeLang(lang) {
+  if (!lang) return null;
+  const s = String(lang).trim().toLowerCase();
+  const map = {
+    zh: "Chinese", "zh-cn": "Chinese", "zh_cn": "Chinese", cn: "Chinese", chinese: "Chinese", "中文": "Chinese", "汉语": "Chinese",
+    en: "English", "en-us": "English", us: "English", english: "English", "英文": "English", "英语": "English",
+  };
+  return map[s] || lang;
+}
+
+// getbot.me 中转层不透传 Qwen-MT 的 translation_options 字段，且 qwen-mt-* 拒绝 system 角色；
+// 因此把翻译指令直接塞进 user content 里。实测 qwen-mt-turbo 输出干净、token 极少（约 30）。
+async function callTranslate(apiKey, cfg, { model, text, sourceLang, targetLang }) {
+  const url = baseURL(cfg).replace(/\/$/, "") + "/chat/completions";
+  const target = normalizeLang(targetLang) || "English";
+  const sourceHint = sourceLang ? ` from ${normalizeLang(sourceLang)}` : "";
+  const prompt = `Translate the following text${sourceHint} to ${target}. Output ONLY the translation, no explanation, no quotes, no commentary.\n\n${text}`;
+  const body = { model, messages: [{ role: "user", content: prompt }], stream: false };
+  const resp = await apiPostJson(url, apiKey, body);
+  const data = await resp.json();
+  const content = data.choices?.[0]?.message?.content;
+  let out;
+  if (typeof content === "string") out = content;
+  else if (Array.isArray(content)) out = content.map((c) => (typeof c === "string" ? c : c.text || "")).join("");
+  else out = String(content ?? "");
+  return out.trim();
+}
+
 // getbot.me 没有 /v1/audio/transcriptions，走 chat/completions 的 input_audio 多模态消息
 async function callTranscription(apiKey, cfg, { model, audioPath, language, tmpDir }) {
   const compactDir = tmpDir || join(dirname(audioPath), ".getbot_tmp_" + Date.now());
@@ -735,6 +764,35 @@ export const GetbotPlugin = async ({ directory }) => {
         },
       }),
 
+      getbot_translate: tool({
+        description: "使用 getbot.me 翻译模型（qwen-mt-plus/turbo）在中英之间互译。用户通过 /getbot-translate <文本> 触发。不传 target_lang 时按输入主语言自动判断：含中文→英文，否则→中文。",
+        args: {
+          text: tool.schema.string().describe("要翻译的原文"),
+          target_lang: tool.schema.string().optional().describe("目标语言：zh / en / Chinese / English；留空则按原文自动判断方向"),
+          source_lang: tool.schema.string().optional().describe("源语言提示（可留空）"),
+          model: tool.schema.string().optional().describe("强制指定模型 ID，默认 qwen-mt-turbo"),
+        },
+        async execute(args) {
+          const config = loadConfig(projectDir);
+          const cache = loadCache(projectDir);
+          const apiKey = await requireKey(projectDir);
+          const model = args.model || resolveDefault(cache, "translate", "qwen-mt-turbo", config);
+          if (!model) return "错误：未配置翻译模型。请先运行 install.mjs";
+          const text = (args.text || "").trim();
+          if (!text) return "错误：text 不能为空";
+          const target = args.target_lang || (/[一-鿿]/.test(text) ? "English" : "Chinese");
+          try {
+            const out = await callTranslate(apiKey, config, {
+              model, text, sourceLang: args.source_lang, targetLang: target,
+            });
+            if (!out) return "翻译失败：模型未返回内容";
+            return `[${model} → ${normalizeLang(target)}]\n${out}`;
+          } catch (e) {
+            return `翻译失败：${e.message}`;
+          }
+        },
+      }),
+
       getbot_md2html: tool({
         description: "把 Markdown 文件转成 A4 打印样式的 HTML 并自动用默认浏览器打开。如果用户需要 PDF，在浏览器里按 Ctrl+P（macOS：Cmd+P）→ '另存为 PDF' 即可。用户通过 /getbot-md2html <md 文件路径> 触发。",
         args: {
@@ -775,6 +833,7 @@ const CATEGORY_LABELS = {
   image: "文生图",
   tts: "语音合成",
   asr: "语音识别",
+  translate: "翻译",
 };
 
 export const tui = async (api) => {
@@ -785,7 +844,7 @@ export const tui = async (api) => {
   let config = loadConfig(projectDir);
 
   // 把缓存里的 defaults 同步进 kv，kv 优先级更高
-  const CATS = ["image", "tts", "asr"];
+  const CATS = ["image", "tts", "asr", "translate"];
   for (const cat of CATS) {
     const saved = kv.get(`getbot.model.${cat}`, null);
     if (!saved) {
