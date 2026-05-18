@@ -4,14 +4,15 @@
 
 这个插件把 getbot.me 中转接入 OpenCode 桌面 app，装完就多出：
 
-  · 模型选择器里多一个 "getbot" 分组，可直接选 Qwen / GPT /
-    Claude / DeepSeek / GLM / Kimi 等 20+ 个模型对话
   · 四个斜杠命令：
       /getbot-image   文生图
       /getbot-tts     语音合成
       /getbot-asr     语音识别
       /getbot-md2html Markdown → A4 打印排版 HTML（需要 PDF 在浏览器里 Ctrl+P 另存）
   · 快捷键 Ctrl+Shift+V ：录音 30 秒 → 自动转文字写入输入框
+
+说明：插件配置的模型只服务于上面这些斜杠命令，不会出现在 OpenCode
+主聊天界面的模型选择器里，也不会修改 opencode.jsonc。
 
 --------------------------------------------------------------
 【前置条件】
@@ -52,8 +53,8 @@
 5. 【重要】完全退出 OpenCode 桌面 app（**托盘图标也要退**），
     然后重开。不然配置不会生效。
 
-6. 打开 OpenCode → 管理模型 → 滚到底能看到 "getbot" 分组，
-   把你想用的模型开关打开就行。
+6. 在任意项目里开一个聊天，输入 / 就能看到 /getbot-image 等
+   斜杠命令；不需要去「管理模型」里做任何配置。
 
 --------------------------------------------------------------
 【使用示例】
@@ -96,20 +97,19 @@
   ~/.config/opencode/plugins/marked.mjs
   ~/.config/opencode/command/getbot-*.md
   ~/.config/opencode/cache/getbot-models*.json
-  ~/.config/opencode/opencode.jsonc 里的 provider.getbot
+  ~/.config/opencode/config/getbot-secret.json（含 apiKey）
 
+opencode.jsonc / opencode.json 不会被动到（安装时也没写过）。
 config/getbot.json 会保留（含用户手调参数），需彻底清就手动删。
 
 --------------------------------------------------------------
 【常见问题】
 --------------------------------------------------------------
 
-Q: 重开 OpenCode 后模型选择器里还是没有 getbot？
+Q: 重开 OpenCode 后看不到 /getbot-image 等斜杠命令？
 A: 1) 确认托盘里的 OpenCode 也退了（右下角系统托盘）
-   2) 管理模型列表往下滚，它可能在下方
-   3) 打开 ~/.config/opencode/opencode.jsonc，确认里面有
-      "provider": { "getbot": { ... } }，且 disabled_providers
-      里没有 "getbot"
+   2) 检查 ~/.config/opencode/command/ 下有 getbot-*.md 文件
+   3) 检查 ~/.config/opencode/plugins/getbot.js 存在
 
 Q: /getbot-image 报 401 / 403 ?
 A: API Key 填错或已失效。重跑一次安装脚本，把新 Key 贴进去。
@@ -125,8 +125,11 @@ A: 检查麦克风权限（macOS：系统设置 → 隐私与安全性 → 麦�
 【安全说明】
 --------------------------------------------------------------
 
-API Key 明文保存在 ~/.config/opencode/opencode.jsonc 的
-provider.getbot.options.apiKey。该文件在你的个人用户目录，只有
-你和管理员能读。切勿把这个文件传给别人或提交到公共仓库。
+API Key 明文保存在 ~/.config/opencode/config/getbot-secret.json
+的 apiKey 字段。该文件在你的个人用户目录，只有你和管理员能读。
+切勿把这个文件传给别人或提交到公共仓库。
+
+本脚本不会把 Key 写进 OpenCode 主配置 opencode.jsonc，所以你
+可以放心分享/版本化 opencode.jsonc 而不泄露 Key。
 
 更新 Key：再跑一次安装脚本，它会覆盖旧 Key。

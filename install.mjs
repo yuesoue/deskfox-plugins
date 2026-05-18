@@ -6,8 +6,12 @@
  *   - plugins/getbot.js + plugins/marked.mjs
  *   - command/getbot-{image,tts,asr,md2html}.md
  *   - config/getbot.json
- *   - opencode.jsonc 合并 provider.getbot + 模型 + apiKey
+ *   - config/getbot-secret.json（apiKey + baseURL，独立保存，不写主配置）
  *   - cache/getbot-models.json
+ *
+ * 注意：本脚本不会修改 opencode.jsonc / opencode.json。
+ * 插件配置的模型只通过 /getbot-image /getbot-tts /getbot-asr 等斜杠命令使用，
+ * 不会出现在 OpenCode 主聊天界面的模型列表中。
  *
  * 用法：
  *   node install.mjs                 # 交互式（会提示粘贴 API Key）
@@ -69,37 +73,24 @@ async function askKey(existing) {
     if (c === "" || /^y/i.test(c)) return existing;
   }
   while (true) {
-    const k = (await prompt("请粘贴 getbot.me API Key（通常以 sk- 开头）: ")).trim();
+    const k = (await prompt("请粘贴 getbot.me API Key: ")).trim();
     if (!k) { warn("Key 不能为空，重试。"); continue; }
-    if (!/^sk-/.test(k)) {
-      const c = (await prompt("Key 不以 sk- 开头，确定要用吗？[y/N]: ")).trim();
-      if (!/^y/i.test(c)) continue;
-    }
     return k;
   }
 }
 
-// ========== JSONC 读写 ==========
-function stripJsoncComments(text) {
-  return text
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:\\])\/\/.*$/gm, "$1");
+// ========== secret 文件读写（apiKey/baseURL 独立保存，不写主配置） ==========
+const SECRET_PATH = join(GLOBAL_DIR, "config", "getbot-secret.json");
+
+function loadSecret() {
+  if (!existsSync(SECRET_PATH)) return {};
+  try { return JSON.parse(readFileSync(SECRET_PATH, "utf-8")); }
+  catch (e) { warn(`解析 ${SECRET_PATH} 失败：${e.message}，将重新生成`); return {}; }
 }
 
-function findGlobalConfigPath() {
-  const jsoncPath = join(GLOBAL_DIR, "opencode.jsonc");
-  const jsonPath = join(GLOBAL_DIR, "opencode.json");
-  if (existsSync(jsoncPath)) return jsoncPath;
-  if (existsSync(jsonPath)) return jsonPath;
-  return jsoncPath;
-}
-
-function loadGlobalConfig(path) {
-  if (!existsSync(path)) return { $schema: "https://opencode.ai/config.json" };
-  const raw = readFileSync(path, "utf-8");
-  try { return JSON.parse(raw); } catch {}
-  try { return JSON.parse(stripJsoncComments(raw)); }
-  catch (e) { throw new Error(`解析 ${path} 失败：${e.message}`); }
+function writeSecret(apiKey) {
+  mkdirSync(dirname(SECRET_PATH), { recursive: true });
+  writeFileSync(SECRET_PATH, JSON.stringify({ apiKey }, null, 2) + "\n", "utf-8");
 }
 
 // ========== API ==========
@@ -133,19 +124,6 @@ function classify(ids) {
     buckets[cat].sort((a, b) => BUCKET_PRIORITY[cat](b) - BUCKET_PRIORITY[cat](a) || a.localeCompare(b));
   }
   return buckets;
-}
-
-function inferModelConfig(id) {
-  const isRealtime = /realtime|streaming/i.test(id);
-  const isOmni = /omni/i.test(id);
-  const isVision = /vision|vl\b|visual/i.test(id);
-  const isAudio = /audio|asr|tts|whisper|speech/i.test(id);
-  const isReasoning = /\bo1\b|\bo3\b|\bo4\b|thinking|reasoning/i.test(id);
-  const cfg = { name: id };
-  cfg.tool_call = !isRealtime;
-  if (isOmni || isVision || isAudio || /gpt-4o|claude/i.test(id)) cfg.attachment = true;
-  if (isReasoning) cfg.reasoning = true;
-  return cfg;
 }
 
 // ========== ffmpeg 检测 ==========
@@ -192,33 +170,6 @@ function installFiles() {
   return result;
 }
 
-// ========== 合并 opencode.jsonc ==========
-function mergeProvider(cfg, apiKey, chatIds) {
-  if (Array.isArray(cfg.disabled_providers)) {
-    const filtered = cfg.disabled_providers.filter((p) => p !== "getbot");
-    if (filtered.length === 0) delete cfg.disabled_providers;
-    else cfg.disabled_providers = filtered;
-  }
-  cfg.provider ??= {};
-  const existing = cfg.provider.getbot || {};
-  const existingModels = existing.models || {};
-  const mergedModels = { ...existingModels };
-  let added = 0;
-  for (const id of chatIds) {
-    if (!mergedModels[id]) { mergedModels[id] = inferModelConfig(id); added++; }
-  }
-  cfg.provider.getbot = {
-    name: existing.name || "getbot",
-    npm: existing.npm || "@ai-sdk/openai-compatible",
-    options: {
-      baseURL: existing.options?.baseURL || DEFAULT_BASE_URL,
-      apiKey,
-    },
-    models: mergedModels,
-  };
-  return { added, total: Object.keys(mergedModels).length };
-}
-
 // ========== 写缓存 ==========
 function writeCache(buckets, raw) {
   const cacheDir = join(GLOBAL_DIR, "cache");
@@ -251,11 +202,9 @@ async function confirmUninstall() {
     join(GLOBAL_DIR, "command", "getbot-md2html.md"),
     join(GLOBAL_DIR, "cache", "getbot-models.json"),
     join(GLOBAL_DIR, "cache", "getbot-models.raw.json"),
+    SECRET_PATH,
   ];
   const existing = targets.filter((p) => existsSync(p));
-  const cfgPath = findGlobalConfigPath();
-  const cfg = existsSync(cfgPath) ? loadGlobalConfig(cfgPath) : null;
-  const hasProvider = !!cfg?.provider?.getbot;
 
   log("将执行以下删除操作：");
   log("");
@@ -265,15 +214,11 @@ async function confirmUninstall() {
   } else {
     log("  （未发现已安装的插件文件）");
   }
-  if (hasProvider) {
-    log("  配置：");
-    log("    - " + cfgPath + " 中的 provider.getbot 整块");
-  }
   log("");
   log("保留：" + join(GLOBAL_DIR, "config", "getbot.json") + "（含你手调的参数）");
   log("");
 
-  if (!existing.length && !hasProvider) {
+  if (!existing.length) {
     log("没有需要卸载的内容，直接退出。");
     return false;
   }
@@ -301,17 +246,11 @@ async function uninstall() {
     join(GLOBAL_DIR, "command", "getbot-md2html.md"),
     join(GLOBAL_DIR, "cache", "getbot-models.json"),
     join(GLOBAL_DIR, "cache", "getbot-models.raw.json"),
+    SECRET_PATH,
   ];
   let removed = 0;
   for (const p of targets) {
     if (existsSync(p)) { rmSync(p); removed++; log("  删 " + p); }
-  }
-
-  const cfgPath = findGlobalConfigPath();
-  if (existsSync(cfgPath)) {
-    const cfg = loadGlobalConfig(cfgPath);
-    if (cfg.provider?.getbot) { delete cfg.provider.getbot; log("  从 opencode.jsonc 移除 provider.getbot"); }
-    writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
   }
 
   log(`✅ 已删除 ${removed} 个文件。config/getbot.json 保留（含用户配置），如需彻底删除：`);
@@ -333,11 +272,10 @@ async function main() {
   log("安装目标：" + GLOBAL_DIR);
   log("");
 
-  // 2. API Key：命令行 > 已配置 > 交互输入
+  // 2. API Key：命令行 > 已配置（secret 文件） > 交互输入
   const argKey = process.argv[2] && !process.argv[2].startsWith("--") ? process.argv[2] : null;
-  const cfgPath = findGlobalConfigPath();
-  const existingCfg = loadGlobalConfig(cfgPath);
-  const existingKey = existingCfg?.provider?.getbot?.options?.apiKey;
+  const existingSecret = loadSecret();
+  const existingKey = existingSecret?.apiKey;
   const apiKey = argKey || await askKey(existingKey);
 
   // 3. 验证 key + 拉模型
@@ -361,11 +299,10 @@ async function main() {
   log(`✓ 命令文件 ${filesResult.commands} 个（/getbot-image /getbot-tts /getbot-asr /getbot-md2html）`);
   log(filesResult.config === 1 ? "✓ config/getbot.json 已写入默认配置" : "  config/getbot.json 已存在，保留用户配置");
 
-  // 5. 合并 opencode.jsonc
-  log("→ 更新全局 opencode.jsonc（注册 provider + " + buckets.chat.length + " 个 chat 模型）...");
-  const providerResult = mergeProvider(existingCfg, apiKey, buckets.chat);
-  writeFileSync(cfgPath, JSON.stringify(existingCfg, null, 2) + "\n", "utf-8");
-  log(`✓ provider.getbot 已写入（模型 ${providerResult.total}，新增 ${providerResult.added}），apiKey 已保存`);
+  // 5. 写 secret 文件（apiKey + baseURL，独立保存，不写主配置）
+  log("→ 保存 API Key 到 " + SECRET_PATH + " ...");
+  writeSecret(apiKey);
+  log("✓ apiKey 已保存（不会写入 opencode.jsonc，插件模型不暴露到主聊天界面）");
 
   // 6. 写缓存
   const toolDefaults = writeCache(buckets, raw);
@@ -399,8 +336,10 @@ async function main() {
   log("📋 下一步：");
   log("  1) 完全退出 OpenCode 桌面 app（包括系统托盘图标）");
   log("  2) 重开 app");
-  log("  3) 进入「管理模型」→ getbot 分组里打开你想用的模型开关");
-  log("  4) 在任意项目里开一个聊天，试试 /getbot-image 一只橘猫");
+  log("  3) 在任意项目里开一个聊天，试试 /getbot-image 一只橘猫");
+  log("");
+  log("说明：插件模型不出现在 OpenCode 主聊天界面的模型列表里，");
+  log("      只能通过 /getbot-image /getbot-tts /getbot-asr 等斜杠命令调用。");
   log("");
   log("如需卸载：node install.mjs --uninstall");
 }

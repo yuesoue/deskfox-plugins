@@ -20,21 +20,10 @@ import { tool } from "@opencode-ai/plugin";
 const DEFAULT_BASE_URL = "https://api.getbot.me/v1";
 const GLOBAL_OC_DIR = join(homedir(), ".config", "opencode");
 
-function stripJsoncComments(text) {
-  return text
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:\\])\/\/.*$/gm, "$1");
-}
-
-function readGlobalOcConfig() {
-  for (const name of ["opencode.jsonc", "opencode.json"]) {
-    const p = join(GLOBAL_OC_DIR, name);
-    if (!existsSync(p)) continue;
-    const raw = readFileSync(p, "utf-8");
-    try { return JSON.parse(raw); } catch {}
-    try { return JSON.parse(stripJsoncComments(raw)); } catch {}
-  }
-  return null;
+function readGetbotSecret() {
+  const p = join(GLOBAL_OC_DIR, "config", "getbot-secret.json");
+  if (!existsSync(p)) return null;
+  try { return JSON.parse(readFileSync(p, "utf-8")); } catch { return null; }
 }
 
 function nowStamp() {
@@ -59,9 +48,9 @@ function loadApiKey(projectDir) {
     const match = readFileSync(envPath, "utf-8").match(/^\s*GETBOT_API_KEY\s*=\s*(.+?)\s*$/m);
     if (match) return match[1].trim();
   }
-  // 3. OpenCode 全局配置里的 provider.getbot.options.apiKey（install.mjs 安装后）
-  const oc = readGlobalOcConfig();
-  const k = oc?.provider?.getbot?.options?.apiKey;
+  // 3. 插件专用 secret 文件（install.mjs 安装后写入，不与 OpenCode 主配置混在一起）
+  const secret = readGetbotSecret();
+  const k = secret?.apiKey;
   if (typeof k === "string" && k && !/^\{env:/.test(k)) return k;
   return null;
 }
