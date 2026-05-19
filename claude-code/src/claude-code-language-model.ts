@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import type {
   LanguageModelV2,
   LanguageModelV2CallWarning,
@@ -40,6 +41,30 @@ function makeUsage(input?: number, output?: number) {
       reasoning: 0,
     },
   } as any
+}
+
+// FORK 2026-05-19 vanilla opencode 没注入 _opencode.sessionID 时,用 prompt 第一条 user
+// message 的哈希当 session 指纹,避免同 cwd+model 下多个 opencode 会话共享 Claude CLI 子进程
+// 导致历史串台. 一次会话里第一条 user message 是稳定的;两个不同会话第一句撞一样概率极低.
+function fingerprintFromPrompt(
+  prompt: Parameters<LanguageModelV2["doStream"]>[0]["prompt"],
+): string {
+  for (const msg of prompt) {
+    if (msg.role !== "user") continue
+    let text = ""
+    if (typeof msg.content === "string") {
+      text = msg.content
+    } else if (Array.isArray(msg.content)) {
+      text = (msg.content as any[])
+        .filter((p) => p.type === "text" && typeof p.text === "string")
+        .map((p: any) => p.text as string)
+        .join("")
+    }
+    if (text) {
+      return createHash("sha256").update(text).digest("hex").slice(0, 12)
+    }
+  }
+  return "default"
 }
 
 export class ClaudeCodeLanguageModel implements LanguageModelV2 {
@@ -154,9 +179,13 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     options: Parameters<LanguageModelV2["doGenerate"]>[0],
   ): Promise<Awaited<ReturnType<LanguageModelV2["doGenerate"]>>> {
     const warnings: LanguageModelV2CallWarning[] = []
-    const cwd = this.config.cwd ?? process.cwd()
+    const providerCwd = (options.providerOptions as any)?._opencode?.cwd
+    const opencodeSessionId =
+      (options.providerOptions as any)?._opencode?.sessionID ??
+      fingerprintFromPrompt(options.prompt)
+    const cwd = providerCwd ?? this.config.cwd ?? process.cwd()
     const scope = this.requestScope(options as any)
-    const sk = sessionKey(cwd, `${this.modelId}::${scope}`)
+    const sk = sessionKey(cwd, `${this.modelId}::${scope}`, opencodeSessionId)
 
     if (scope === "no-tools") {
       const text = this.synthesizeTitle(options.prompt)
@@ -490,11 +519,14 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     // providerOptions 里加 _opencode.cwd = Instance.directory, 让所有 spawn-based plugin 共用此协议.
     // 优先级: _opencode.cwd > config.cwd > process.cwd() (process.cwd() 是 sidecar 启动目录, 不跟随用户切项目).
     const providerCwd = (options.providerOptions as any)?._opencode?.cwd
+    const opencodeSessionId =
+      (options.providerOptions as any)?._opencode?.sessionID ??
+      fingerprintFromPrompt(options.prompt)
     const cwd = providerCwd ?? this.config.cwd ?? process.cwd()
     const cliPath = this.config.cliPath
     const skipPermissions = this.config.skipPermissions !== false
     const scope = this.requestScope(options as any)
-    const sk = sessionKey(cwd, `${this.modelId}::${scope}`)
+    const sk = sessionKey(cwd, `${this.modelId}::${scope}`, opencodeSessionId)
 
     if (scope === "no-tools") {
       const text = this.synthesizeTitle(options.prompt)

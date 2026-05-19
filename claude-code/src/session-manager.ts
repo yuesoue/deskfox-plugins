@@ -136,9 +136,16 @@ export function buildCliArgs(opts: {
 }
 
 /**
- * Build a session key that includes both cwd and model,
- * so different models get separate processes.
+ * Build a session key that includes cwd, model, and the opencode sessionID
+ * so different opencode sessions on the same project+model get separate
+ * Claude CLI processes (otherwise they share stdin/stdout and conversation history).
+ * opencodeSessionId comes from providerOptions._opencode.sessionID (deskfox-fork).
+ * Falls back to "default" on vanilla opencode — same as previous behavior.
  */
-export function sessionKey(cwd: string, modelId: string): string {
-  return `${cwd}::${modelId}`
+export function sessionKey(
+  cwd: string,
+  modelId: string,
+  opencodeSessionId?: string,
+): string {
+  return `${cwd}::${modelId}::${opencodeSessionId ?? "default"}`
 }

@@ -1,4 +1,5 @@
 // src/claude-code-language-model.ts
+import { createHash } from "crypto";
 import { generateId } from "@ai-sdk/provider-utils";
 
 // src/logger.ts
@@ -424,8 +425,8 @@ function buildCliArgs(opts) {
   }
   return args;
 }
-function sessionKey(cwd, modelId) {
-  return `${cwd}::${modelId}`;
+function sessionKey(cwd, modelId, opencodeSessionId) {
+  return `${cwd}::${modelId}::${opencodeSessionId ?? "default"}`;
 }
 
 // src/claude-code-language-model.ts
@@ -443,6 +444,21 @@ function makeUsage(input, output) {
       reasoning: 0
     }
   };
+}
+function fingerprintFromPrompt(prompt) {
+  for (const msg of prompt) {
+    if (msg.role !== "user") continue;
+    let text = "";
+    if (typeof msg.content === "string") {
+      text = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      text = msg.content.filter((p) => p.type === "text" && typeof p.text === "string").map((p) => p.text).join("");
+    }
+    if (text) {
+      return createHash("sha256").update(text).digest("hex").slice(0, 12);
+    }
+  }
+  return "default";
 }
 var ClaudeCodeLanguageModel = class {
   specificationVersion = "v2";
@@ -521,9 +537,11 @@ var ClaudeCodeLanguageModel = class {
   }
   async doGenerate(options) {
     const warnings = [];
-    const cwd = this.config.cwd ?? process.cwd();
+    const providerCwd = options.providerOptions?._opencode?.cwd;
+    const opencodeSessionId = options.providerOptions?._opencode?.sessionID ?? fingerprintFromPrompt(options.prompt);
+    const cwd = providerCwd ?? this.config.cwd ?? process.cwd();
     const scope = this.requestScope(options);
-    const sk = sessionKey(cwd, `${this.modelId}::${scope}`);
+    const sk = sessionKey(cwd, `${this.modelId}::${scope}`, opencodeSessionId);
     if (scope === "no-tools") {
       const text = this.synthesizeTitle(options.prompt);
       return {
@@ -790,11 +808,12 @@ ${plan}
   async doStream(options) {
     const warnings = [];
     const providerCwd = options.providerOptions?._opencode?.cwd;
+    const opencodeSessionId = options.providerOptions?._opencode?.sessionID ?? fingerprintFromPrompt(options.prompt);
     const cwd = providerCwd ?? this.config.cwd ?? process.cwd();
     const cliPath = this.config.cliPath;
     const skipPermissions = this.config.skipPermissions !== false;
     const scope = this.requestScope(options);
-    const sk = sessionKey(cwd, `${this.modelId}::${scope}`);
+    const sk = sessionKey(cwd, `${this.modelId}::${scope}`, opencodeSessionId);
     if (scope === "no-tools") {
       const text = this.synthesizeTitle(options.prompt);
       const textId = generateId();
