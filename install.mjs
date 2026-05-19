@@ -3,24 +3,29 @@
  * getbot.me × OpenCode 一键安装脚本
  *
  * 默认安装到 OpenCode 全局目录：~/.config/opencode/
- *   - plugins/getbot.js + plugins/marked.mjs
- *   - command/getbot-{image,tts,asr,translate,md2html}.md
+ *   - plugins/getbot/{getbot.js, marked.mjs, package.json}   ← 子目录形态（opencode 加载要求）
+ *   - command/getbot-{image,tts,asr,translate,md2html,doctor,logs}.md
  *   - config/getbot.json
  *   - config/getbot-secret.json（apiKey + baseURL，独立保存，不写主配置）
  *   - cache/getbot-models.json
  *
- * 注意：本脚本不会修改 opencode.jsonc / opencode.json。
- * 插件配置的模型只通过 /getbot-image /getbot-tts /getbot-asr 等斜杠命令使用，
- * 不会出现在 OpenCode 主聊天界面的模型列表中。
+ * 同时会**自动 patch** ~/.config/opencode/opencode.jsonc：
+ *   - 在 "plugin" 数组里追加 "file:///.../plugins/getbot"（已存在则跳过，幂等）
+ *   - patch 前自动备份原文件到 opencode.jsonc.bak.<时间戳>
+ *
+ * 老版本（v1）会把 getbot.js / marked.mjs 直接放在 plugins/ 根下 —— opencode 不会
+ * 自动加载这种"孤儿文件"。本脚本在检测到老布局时，自动把孤儿文件移到
+ * plugins/.getbot-legacy-backup-<时间戳>/ 以保留可恢复历史。
  *
  * 用法：
  *   node install.mjs                 # 交互式（会提示粘贴 API Key）
  *   node install.mjs sk-xxxxxxxx     # 非交互，直接传 Key
  *   node install.mjs --uninstall     # 卸载
+ *   node install.mjs --dry-run       # 只展示会做什么，不实际改任何文件
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, rmSync, statSync } from "node:fs";
-import { resolve, dirname, join } from "node:path";
+import { resolve, dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { homedir, platform } from "node:os";
@@ -29,6 +34,31 @@ import { createInterface } from "node:readline";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const GLOBAL_DIR = join(homedir(), ".config", "opencode");
 const DEFAULT_BASE_URL = "https://api.getbot.me/v1";
+
+// 子目录形态的插件包路径（opencode 通过 file:// URL + package.json#exports."./server" 加载）
+const PLUGIN_PKG_DIR = join(GLOBAL_DIR, "plugins", "getbot");
+const OPENCODE_CONFIG_CANDIDATES = ["opencode.jsonc", "opencode.json"];
+
+// 把 Windows 路径转为 opencode 能识别的 file:/// URL
+function pluginFileUrl() {
+  const norm = PLUGIN_PKG_DIR.replace(/\\/g, "/");
+  return /^[a-zA-Z]:/.test(norm) ? "file:///" + norm : "file://" + norm;
+}
+
+const PLUGIN_PACKAGE_JSON = {
+  name: "@getbot/opencode-plugin",
+  version: "0.0.0-local",
+  private: true,
+  type: "module",
+  description: "getbot.me × OpenCode 多模态插件（image/tts/asr/translate/md2html + logs + doctor）",
+  main: "./getbot.js",
+  exports: {
+    "./server": "./getbot.js",
+    "./tui": "./getbot.js",
+  },
+};
+
+const DRY_RUN = process.argv.includes("--dry-run");
 
 // ========== 分类规则（与 setup-getbot.mjs 保持一致）==========
 // translate 必须排在 asr 前面：qwen3-livetranslate-* 含 "translate" 也含 "live"，
@@ -45,6 +75,147 @@ const BUCKET_PRIORITY = {
   asr: (id) => (/(^|[-_])omni/i.test(id) ? 3 : 0) + (/whisper/i.test(id) ? 2 : 0) + (/livetranslate/i.test(id) ? -1 : 0),
   translate: (id) => (/turbo/i.test(id) ? 2 : 0) + (/\bplus\b/i.test(id) ? 1 : 0),
 };
+
+// ========== JSONC patcher（在 opencode.jsonc 的 plugin 数组里加/删一行 URL，保留注释/格式）==========
+// 不用第三方包；只做字符串扫描。覆盖以下格式：
+//   "plugin": []                          → 空数组
+//   "plugin": ["url"]                     → 单行
+//   "plugin": [ "url1", "url2" ]          → 单行多项
+//   "plugin": [\n    "url1"\n  ]          → 多行
+//   "plugin": [\n    "url1",\n    "url2"\n  ]   → 多行多项（带/不带尾随逗号都行）
+//   完全没 "plugin" 键的根对象           → 自动添加
+
+function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+// 在 text 里找到 "plugin" 数组的 [ 和匹配的 ]，返回 {arrayStart, arrayClose} 或 null
+function locatePluginArray(text) {
+  const m = text.match(/"plugin"\s*:\s*\[/);
+  if (!m) return null;
+  const arrayStart = m.index + m[0].length;
+  let depth = 1, i = arrayStart, inString = false, escape = false;
+  while (i < text.length && depth > 0) {
+    const c = text[i];
+    if (escape) { escape = false; i++; continue; }
+    if (c === "\\") { escape = true; i++; continue; }
+    if (c === '"') inString = !inString;
+    else if (!inString) {
+      if (c === "[") depth++;
+      else if (c === "]") depth--;
+    }
+    if (depth === 0) break;
+    i++;
+  }
+  if (depth !== 0) return null;
+  return { arrayStart, arrayClose: i };
+}
+
+function patchAddPlugin(text, url) {
+  const loc = locatePluginArray(text);
+  if (!loc) return insertPluginKey(text, url);
+  const { arrayStart, arrayClose } = loc;
+  const arrayContent = text.slice(arrayStart, arrayClose);
+
+  if (arrayContent.includes(`"${url}"`)) {
+    return { changed: false, text, action: "plugin 数组已包含本插件 URL，跳过" };
+  }
+
+  const isMultiline = /\n/.test(arrayContent);
+  // 注意 j 边界：允许 j 跌到 arrayStart-1（即 `[`），用于识别"全空白数组"
+  let j = arrayClose - 1;
+  while (j >= arrayStart && /\s/.test(text[j])) j--;
+  const lastChar = j < arrayStart ? "" : text[j];
+  const isEmpty = lastChar === "" || lastChar === "[";
+
+  // 推算缩进
+  const closeLineStart = text.lastIndexOf("\n", arrayClose) + 1;
+  const closeLine = text.slice(closeLineStart, arrayClose);
+  const closeIndent = (closeLine.match(/^\s*/) || [""])[0];
+  const itemIndent = closeIndent + "  ";
+
+  if (isEmpty) {
+    const insertion = isMultiline
+      ? `\n${itemIndent}"${url}"\n${closeIndent}`
+      : `"${url}"`;
+    return {
+      changed: true,
+      text: text.slice(0, arrayStart) + insertion + text.slice(arrayClose),
+      action: "在空 plugin 数组中插入",
+    };
+  }
+
+  const tail = text.slice(j + 1, arrayClose);
+  if (isMultiline) {
+    const insertion = lastChar === ","
+      ? `\n${itemIndent}"${url}"`
+      : `,\n${itemIndent}"${url}"`;
+    return {
+      changed: true,
+      text: text.slice(0, j + 1) + insertion + tail + text.slice(arrayClose),
+      action: "在多行 plugin 数组末尾追加",
+    };
+  }
+  const insertion = lastChar === "," ? ` "${url}"` : `, "${url}"`;
+  return {
+    changed: true,
+    text: text.slice(0, j + 1) + insertion + tail + text.slice(arrayClose),
+    action: "在单行 plugin 数组末尾追加",
+  };
+}
+
+function insertPluginKey(text, url) {
+  // 根对象 } 的位置
+  let i = text.length - 1;
+  while (i >= 0 && /\s/.test(text[i])) i--;
+  if (i < 0 || text[i] !== "}") {
+    return { changed: false, text, action: "找不到根对象 }，无法添加 plugin 键" };
+  }
+  const closeLineStart = text.lastIndexOf("\n", i) + 1;
+  const closeLine = text.slice(closeLineStart, i);
+  const closeIndent = (closeLine.match(/^\s*/) || [""])[0];
+  const fieldIndent = closeIndent + "  ";
+
+  let j = i - 1;
+  while (j >= 0 && /\s/.test(text[j])) j--;
+  const needsComma = j >= 0 && text[j] !== "{" && text[j] !== ",";
+
+  const insertion = (needsComma ? "," : "") +
+    `\n${fieldIndent}"plugin": [\n${fieldIndent}  "${url}"\n${fieldIndent}]`;
+
+  return {
+    changed: true,
+    text: text.slice(0, j + 1) + insertion + text.slice(j + 1, i) + text.slice(i),
+    action: '根对象里添加新 "plugin" 键',
+  };
+}
+
+function patchRemovePlugin(text, url) {
+  if (!text.includes(`"${url}"`)) return { changed: false, text, action: "未找到本插件 URL" };
+
+  const escUrl = escRe(`"${url}"`);
+
+  // 仅含本项的数组：[\s*"url"\s*]
+  const onlyItemRe = new RegExp(`(\\[)(\\s*)${escUrl}(\\s*)(\\])`);
+  if (onlyItemRe.test(text)) {
+    return {
+      changed: true,
+      text: text.replace(onlyItemRe, "$1$4"),
+      action: "本插件是数组唯一项，移除后变空数组",
+    };
+  }
+
+  // 前面有其它项："url" 前的逗号 + 空白
+  const leadingCommaRe = new RegExp(`,\\s*${escUrl}`);
+  if (leadingCommaRe.test(text)) {
+    return { changed: true, text: text.replace(leadingCommaRe, ""), action: "移除（前有逗号的项）" };
+  }
+  // 后面有其它项："url" 后的逗号 + 空白
+  const trailingCommaRe = new RegExp(`${escUrl}\\s*,\\s*`);
+  if (trailingCommaRe.test(text)) {
+    return { changed: true, text: text.replace(trailingCommaRe, ""), action: "移除（后有逗号的项）" };
+  }
+  // 兜底：直接删 URL 串（不应触发）
+  return { changed: true, text: text.replace(new RegExp(escUrl), ""), action: "强制移除（可能留下脏格式）" };
+}
 
 // ========== 日志工具 ==========
 function log(msg = "") { process.stdout.write(msg + "\n"); }
@@ -159,19 +330,138 @@ function copyTree(srcDir, dstDir, patternRe) {
   return count;
 }
 
+// 把老布局留下的孤儿文件（plugins/getbot.js + plugins/marked.mjs）移到时间戳备份目录
+// 这种文件 opencode 不会自动加载，但放在那儿让人误以为已经装好；统一搬走避免歧义
+function migrateLegacyOrphans() {
+  const orphans = [
+    join(GLOBAL_DIR, "plugins", "getbot.js"),
+    join(GLOBAL_DIR, "plugins", "marked.mjs"),
+  ].filter((p) => existsSync(p));
+  if (!orphans.length) return null;
+  const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+  const backup = join(GLOBAL_DIR, "plugins", `.getbot-legacy-backup-${stamp}`);
+  if (DRY_RUN) {
+    log(`  [dry-run] 会把以下孤儿文件移到 ${backup}/:`);
+    for (const p of orphans) log("    - " + p);
+    return backup;
+  }
+  mkdirSync(backup, { recursive: true });
+  for (const p of orphans) {
+    const dst = join(backup, basename(p));
+    copyFileSync(p, dst);
+    rmSync(p);
+    log("  ↻ 老孤儿 → " + dst);
+  }
+  return backup;
+}
+
 function installFiles() {
-  const result = { plugin: 0, commands: 0, config: 0 };
-  result.plugin = copyTree(join(__dirname, "plugins"), join(GLOBAL_DIR, "plugins"));
-  result.commands = copyTree(join(__dirname, "command"), join(GLOBAL_DIR, "command"), /^getbot-.*\.md$/i);
-  // config 文件只有第一次安装时写入，已有则保留（保护用户手工改动）
+  const result = { plugin: 0, commands: 0, config: 0, legacyMoved: null };
+
+  // 0. 检测并搬走老布局的孤儿文件
+  result.legacyMoved = migrateLegacyOrphans();
+
+  // 1. 新布局：plugins/getbot/ 子目录（含 package.json + getbot.js + marked.mjs）
+  if (DRY_RUN) {
+    log(`  [dry-run] 会写入 ${PLUGIN_PKG_DIR}/{getbot.js,marked.mjs,package.json}`);
+    result.plugin = 3;
+  } else {
+    mkdirSync(PLUGIN_PKG_DIR, { recursive: true });
+    copyFileSync(join(__dirname, "plugins", "getbot.js"), join(PLUGIN_PKG_DIR, "getbot.js"));
+    copyFileSync(join(__dirname, "plugins", "marked.mjs"), join(PLUGIN_PKG_DIR, "marked.mjs"));
+    writeFileSync(join(PLUGIN_PKG_DIR, "package.json"), JSON.stringify(PLUGIN_PACKAGE_JSON, null, 2) + "\n", "utf-8");
+    result.plugin = 3;
+  }
+
+  // 2. 命令文件（不变）
+  if (DRY_RUN) {
+    const cmdFiles = readdirSync(join(__dirname, "command")).filter((n) => /^getbot-.*\.md$/i.test(n));
+    log(`  [dry-run] 会复制 ${cmdFiles.length} 个命令文件到 ${join(GLOBAL_DIR, "command")}`);
+    result.commands = cmdFiles.length;
+  } else {
+    result.commands = copyTree(join(__dirname, "command"), join(GLOBAL_DIR, "command"), /^getbot-.*\.md$/i);
+  }
+
+  // 3. config 文件只有第一次安装时写入（保留用户手调）
   const srcCfg = join(__dirname, "config", "getbot.json");
   const dstCfg = join(GLOBAL_DIR, "config", "getbot.json");
   if (!existsSync(dstCfg)) {
-    mkdirSync(dirname(dstCfg), { recursive: true });
-    copyFileSync(srcCfg, dstCfg);
+    if (DRY_RUN) {
+      log(`  [dry-run] 会写入 ${dstCfg}`);
+    } else {
+      mkdirSync(dirname(dstCfg), { recursive: true });
+      copyFileSync(srcCfg, dstCfg);
+    }
     result.config = 1;
   }
   return result;
+}
+
+// 找 opencode 主配置文件；若都不存在，创建最小 jsonc
+function findOrCreateOpencodeConfig() {
+  for (const name of OPENCODE_CONFIG_CANDIDATES) {
+    const p = join(GLOBAL_DIR, name);
+    if (existsSync(p)) return p;
+  }
+  const p = join(GLOBAL_DIR, "opencode.jsonc");
+  if (DRY_RUN) {
+    log(`  [dry-run] 没找到主配置，会创建空 ${p}`);
+    return p;
+  }
+  mkdirSync(GLOBAL_DIR, { recursive: true });
+  writeFileSync(p, `{\n  "$schema": "https://opencode.ai/config.json"\n}\n`, "utf-8");
+  log("  创建主配置: " + p);
+  return p;
+}
+
+function backupFile(p) {
+  const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+  const bak = `${p}.bak.${stamp}`;
+  if (DRY_RUN) {
+    log(`  [dry-run] 会备份 ${p} → ${bak}`);
+    return bak;
+  }
+  copyFileSync(p, bak);
+  return bak;
+}
+
+function patchOpencodeJsoncAdd() {
+  const cfgPath = findOrCreateOpencodeConfig();
+  const url = pluginFileUrl();
+  const raw = existsSync(cfgPath) ? readFileSync(cfgPath, "utf-8") : `{\n  "$schema": "https://opencode.ai/config.json"\n}\n`;
+  const { changed, text, action } = patchAddPlugin(raw, url);
+  if (!changed) {
+    log(`  ${cfgPath}: ${action}`);
+    return { changed: false, cfgPath };
+  }
+  const bak = backupFile(cfgPath);
+  if (DRY_RUN) {
+    log(`  [dry-run] 会写入 ${cfgPath}（${action}）`);
+  } else {
+    writeFileSync(cfgPath, text, "utf-8");
+    log(`  ${cfgPath}: ${action}（备份在 ${bak}）`);
+  }
+  return { changed: true, cfgPath, bak };
+}
+
+function patchOpencodeJsoncRemove() {
+  const cfgPath = findOrCreateOpencodeConfig();
+  if (!existsSync(cfgPath)) return { changed: false, cfgPath };
+  const url = pluginFileUrl();
+  const raw = readFileSync(cfgPath, "utf-8");
+  const { changed, text, action } = patchRemovePlugin(raw, url);
+  if (!changed) {
+    log(`  ${cfgPath}: ${action}`);
+    return { changed: false, cfgPath };
+  }
+  const bak = backupFile(cfgPath);
+  if (DRY_RUN) {
+    log(`  [dry-run] 会写入 ${cfgPath}（${action}）`);
+  } else {
+    writeFileSync(cfgPath, text, "utf-8");
+    log(`  ${cfgPath}: ${action}（备份在 ${bak}）`);
+  }
+  return { changed: true, cfgPath, bak };
 }
 
 // ========== 写缓存 ==========
@@ -195,36 +485,52 @@ function writeCache(buckets, raw) {
 }
 
 // ========== 卸载 ==========
-async function confirmUninstall() {
-  if (process.argv.includes("--yes") || process.argv.includes("-y")) return true;
-
-  const targets = [
+function uninstallTargets() {
+  // 文件列表（含老 / 新两种布局的所有可能位置）
+  const files = [
+    // 老布局孤儿（v1）
     join(GLOBAL_DIR, "plugins", "getbot.js"),
     join(GLOBAL_DIR, "plugins", "marked.mjs"),
+    // 命令
     join(GLOBAL_DIR, "command", "getbot-image.md"),
     join(GLOBAL_DIR, "command", "getbot-tts.md"),
     join(GLOBAL_DIR, "command", "getbot-asr.md"),
     join(GLOBAL_DIR, "command", "getbot-translate.md"),
     join(GLOBAL_DIR, "command", "getbot-md2html.md"),
+    join(GLOBAL_DIR, "command", "getbot-doctor.md"),
+    join(GLOBAL_DIR, "command", "getbot-logs.md"),
+    // 缓存 + secret
     join(GLOBAL_DIR, "cache", "getbot-models.json"),
     join(GLOBAL_DIR, "cache", "getbot-models.raw.json"),
     SECRET_PATH,
-  ];
-  const existing = targets.filter((p) => existsSync(p));
+  ].filter((p) => existsSync(p));
+  // 目录（新布局插件包）
+  const dirs = [PLUGIN_PKG_DIR].filter((p) => existsSync(p));
+  return { files, dirs };
+}
 
+async function confirmUninstall() {
+  if (process.argv.includes("--yes") || process.argv.includes("-y")) return true;
+
+  const { files, dirs } = uninstallTargets();
   log("将执行以下删除操作：");
   log("");
-  if (existing.length) {
-    log("  文件（" + existing.length + " 个）：");
-    for (const p of existing) log("    - " + p);
-  } else {
-    log("  （未发现已安装的插件文件）");
+  if (dirs.length) {
+    log("  目录（" + dirs.length + " 个）：");
+    for (const p of dirs) log("    - " + p);
   }
+  if (files.length) {
+    log("  文件（" + files.length + " 个）：");
+    for (const p of files) log("    - " + p);
+  }
+  if (!dirs.length && !files.length) log("  （未发现已安装的插件文件）");
+  log("");
+  log("另外会从 opencode.jsonc 的 plugin 数组里移除：" + pluginFileUrl());
   log("");
   log("保留：" + join(GLOBAL_DIR, "config", "getbot.json") + "（含你手调的参数）");
   log("");
 
-  if (!existing.length) {
+  if (!dirs.length && !files.length) {
     log("没有需要卸载的内容，直接退出。");
     return false;
   }
@@ -243,24 +549,28 @@ async function uninstall() {
 
   log("");
   log("→ 卸载 getbot 插件...");
-  const targets = [
-    join(GLOBAL_DIR, "plugins", "getbot.js"),
-    join(GLOBAL_DIR, "plugins", "marked.mjs"),
-    join(GLOBAL_DIR, "command", "getbot-image.md"),
-    join(GLOBAL_DIR, "command", "getbot-tts.md"),
-    join(GLOBAL_DIR, "command", "getbot-asr.md"),
-    join(GLOBAL_DIR, "command", "getbot-translate.md"),
-    join(GLOBAL_DIR, "command", "getbot-md2html.md"),
-    join(GLOBAL_DIR, "cache", "getbot-models.json"),
-    join(GLOBAL_DIR, "cache", "getbot-models.raw.json"),
-    SECRET_PATH,
-  ];
+  const { files, dirs } = uninstallTargets();
   let removed = 0;
-  for (const p of targets) {
-    if (existsSync(p)) { rmSync(p); removed++; log("  删 " + p); }
+
+  for (const p of dirs) {
+    if (DRY_RUN) { log("  [dry-run] 会删目录 " + p); continue; }
+    rmSync(p, { recursive: true, force: true });
+    removed++;
+    log("  删目录 " + p);
+  }
+  for (const p of files) {
+    if (DRY_RUN) { log("  [dry-run] 会删文件 " + p); continue; }
+    rmSync(p);
+    removed++;
+    log("  删 " + p);
   }
 
-  log(`✅ 已删除 ${removed} 个文件。config/getbot.json 保留（含用户配置），如需彻底删除：`);
+  // 从 opencode.jsonc 移除 plugin 登记
+  log("→ 从 opencode.jsonc 摘除本插件登记 ...");
+  patchOpencodeJsoncRemove();
+
+  log("");
+  log(`✅ 已清理 ${removed} 项。config/getbot.json 保留（含用户配置），如需彻底删除：`);
   log("    rm " + join(GLOBAL_DIR, "config", "getbot.json"));
   log("");
 }
@@ -302,9 +612,14 @@ async function main() {
   // 4. 复制插件、命令、config
   log("→ 复制插件到 " + GLOBAL_DIR + " ...");
   const filesResult = installFiles();
-  log(`✓ plugins/getbot.js 已安装`);
-  log(`✓ 命令文件 ${filesResult.commands} 个（/getbot-image /getbot-tts /getbot-asr /getbot-translate /getbot-md2html）`);
+  log(`✓ 插件包已安装：${PLUGIN_PKG_DIR}/{getbot.js,marked.mjs,package.json}`);
+  if (filesResult.legacyMoved) log(`  老布局孤儿已搬到 ${filesResult.legacyMoved}（可手动删除）`);
+  log(`✓ 命令文件 ${filesResult.commands} 个`);
   log(filesResult.config === 1 ? "✓ config/getbot.json 已写入默认配置" : "  config/getbot.json 已存在，保留用户配置");
+
+  // 4.5 patch opencode.jsonc 让 opencode 识别本插件
+  log("→ 登记到 opencode 主配置（opencode.jsonc 的 plugin 数组）...");
+  patchOpencodeJsoncAdd();
 
   // 5. 写 secret 文件（apiKey + baseURL，独立保存，不写主配置）
   log("→ 保存 API Key 到 " + SECRET_PATH + " ...");
@@ -324,30 +639,30 @@ async function main() {
   log("  ✅ 安装完成");
   log("==============================================================");
   log("");
-  log("已注册 5 个斜杠命令（在 OpenCode 聊天窗输入 / 查看）：");
+  log("已注册 8 个斜杠命令（在 OpenCode 聊天窗输入 / 查看）：");
   log(`  /getbot-image     文生图    默认模型 → ${toolDefaults.image || "（无可用模型）"}`);
   log(`  /getbot-tts       语音合成  默认模型 → ${toolDefaults.tts || "（无可用模型）"}`);
   log(`  /getbot-asr       语音识别  默认模型 → ${toolDefaults.asr || "（无可用模型）"}`);
   log(`  /getbot-translate 中英互译  默认模型 → ${toolDefaults.translate || "（无可用模型）"}`);
-  log(`  /getbot-md2html   MD 转打印排版 HTML（需要 PDF 在浏览器里 Ctrl+P 另存，无需模型）`);
+  log(`  /getbot-md2html   MD 转打印排版 HTML（在浏览器里 Ctrl+P 另存 PDF）`);
+  log(`  /getbot-help      使用说明（命令清单 / TTS 音色 / 默认模型 / 排查入口）`);
+  log(`  /getbot-doctor    环境诊断  缺依赖时给出可拷贝给 AI 助理的自动安装提示词`);
+  log(`  /getbot-logs      打开调用日志文件夹（排查时把今天的日志发给开发者）`);
   log("快捷键：Ctrl+Shift+V → 录音 30s → 自动转文字插入输入框");
   log("");
 
   if (!hasFfmpeg) {
-    log("⚠  未检测到 ffmpeg，语音识别 / 语音输入会受影响：");
-    log("    Windows: winget install Gyan.FFmpeg");
-    log("    macOS:   brew install ffmpeg");
-    log("    Linux:   sudo apt install ffmpeg");
+    log("⚠  未检测到 ffmpeg，语音功能将受限。重启 opencode 后跑 /getbot-doctor 看自动安装指引。");
     log("");
   }
 
   log("📋 下一步：");
   log("  1) 完全退出 OpenCode 桌面 app（包括系统托盘图标）");
   log("  2) 重开 app");
-  log("  3) 在任意项目里开一个聊天，试试 /getbot-image 一只橘猫");
+  log("  3) 输 /getbot-help 看完整说明，/getbot-doctor 确认环境，再试 /getbot-image 一只橘猫");
   log("");
-  log("说明：插件模型不出现在 OpenCode 主聊天界面的模型列表里，");
-  log("      只能通过 /getbot-image /getbot-tts /getbot-asr 等斜杠命令调用。");
+  log("说明：插件已登记到 opencode.jsonc 的 plugin 数组。");
+  log("      插件模型不出现在 OpenCode 主聊天的模型列表里，只通过 /getbot-* 斜杠命令调用。");
   log("");
   log("如需卸载：node install.mjs --uninstall");
 }

@@ -124,6 +124,41 @@ async function requireKey(projectDir) {
   return key;
 }
 
+// ========== 短时去重（防 LLM agentic loop 重复调用）==========
+// 仅对"确定性输出"工具启用：同 (projectDir + 工具名 + args) 在 DEDUP_TTL_MS 内复现 → 直接返回上次结果，
+// 不实际打 API、不写新文件。LLM 看到的返回串与上次完全一致，对其不可见；ctx.resolved.dedupHit 在日志里留痕。
+// 不启用的工具：getbot_image（生成带随机性）、getbot_asr/md2html（输入可能变）、getbot_doctor/logs（诊断需实时）
+const DEDUP_TTL_MS = 60000;
+const DEDUP_MAX_ENTRIES = 50;
+const recentCalls = new Map(); // key → { ts, result, outputs }
+
+function dedupKey(projectDir, toolName, args) {
+  const sorted = {};
+  for (const k of Object.keys(args || {}).sort()) sorted[k] = args[k];
+  return `${projectDir}|${toolName}|${JSON.stringify(sorted)}`;
+}
+
+function checkDedup(projectDir, toolName, args) {
+  const key = dedupKey(projectDir, toolName, args);
+  const hit = recentCalls.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > DEDUP_TTL_MS) {
+    recentCalls.delete(key);
+    return null;
+  }
+  return { ...hit, ageMs: Date.now() - hit.ts };
+}
+
+function recordCall(projectDir, toolName, args, result, outputs) {
+  const key = dedupKey(projectDir, toolName, args);
+  recentCalls.set(key, { ts: Date.now(), result, outputs });
+  // 懒 GC：条目过多时清掉早于 TTL 的
+  if (recentCalls.size > DEDUP_MAX_ENTRIES) {
+    const cutoff = Date.now() - DEDUP_TTL_MS;
+    for (const [k, v] of recentCalls) if (v.ts < cutoff) recentCalls.delete(k);
+  }
+}
+
 // ========== 调用日志 ==========
 // 每次工具调用写一行 JSONL 到 <projectDir>/.opencode/logs/getbot-YYYY-MM-DD.jsonl
 // 设计目标：对方机器出问题时把当天日志发回来就能定位
@@ -1112,10 +1147,10 @@ export const GetbotPlugin = async ({ directory }) => {
       }),
 
       getbot_tts: tool({
-        description: "使用 getbot.me TTS 模型将文字合成语音（走 /v1/audio/speech，返回 WAV）。voice 有默认值，调用时只需提供 text 即可，不要向用户询问。如不传 text 或 text 为空字符串，则不合成、直接返回可用音色列表给用户参考。",
+        description: "使用 getbot.me TTS 模型把文字合成 WAV 音频。严格只调用 1 次：拿到返回后立即停止，不要重试。传入 text 即可，voice 有默认值。想看可用音色 / 命令列表请用 /getbot-help。",
         args: {
-          text: tool.schema.string().optional().describe("要合成的文本，≤2000 字，中英皆可。留空则改为返回音色列表"),
-          voice: tool.schema.string().optional().describe("音色名。不传则使用配置文件中的默认值（Qwen TTS 有效音色：Cherry/Ethan/Serena/Chelsie；也支持 alloy/echo 等 OpenAI 音色）"),
+          text: tool.schema.string().describe("要合成的文本，≤2000 字，中英皆可"),
+          voice: tool.schema.string().optional().describe("音色名（Cherry/Ethan/Serena/Chelsie；详见 /getbot-help）"),
           model: tool.schema.string().optional().describe("强制指定模型 ID"),
         },
         async execute(args) {
@@ -1126,19 +1161,8 @@ export const GetbotPlugin = async ({ directory }) => {
 
             const text = (args.text || "").trim();
             if (!text) {
-              const defaultVoice = config?.defaults?.tts_voice || "Cherry";
-              const ttsModel = resolveDefault(cache, "tts", null, config) || "（无可用模型）";
-              const lines = [
-                `getbot TTS 可用音色（模型：${ttsModel}）：`,
-                ...TTS_VOICES.map((v) => `  - ${v}${v === defaultVoice ? "  ← 默认" : ""}`),
-                "",
-                "用法：",
-                `  /getbot-tts 今天天气真好         （用默认音色 ${defaultVoice}）`,
-                `  对话中说 "用 Ethan 念：你好"   （指定音色）`,
-              ];
-              ctx.resolved = { mode: "list_voices", model: ttsModel };
-              ctx.ok = true;
-              return lines.join("\n");
+              ctx.error = "text 为空";
+              return "错误：未提供要合成的文本。\n\n示例：\n  /getbot-tts 今天天气真好\n\n查看可用音色 / 完整命令请输：/getbot-help";
             }
 
             const apiKey = await requireKey(projectDir);
@@ -1155,13 +1179,24 @@ export const GetbotPlugin = async ({ directory }) => {
               outDir,
             };
 
+            // 短时去重：同样文本+voice 在 60s 内重复 → 返回上次结果
+            const dedupHit = checkDedup(projectDir, "getbot_tts", args);
+            if (dedupHit) {
+              ctx.resolved = { ...ctx.resolved, dedupHit: true, dedupAgeMs: dedupHit.ageMs };
+              ctx.outputs = dedupHit.outputs;
+              ctx.ok = true;
+              return dedupHit.result;
+            }
+
             const buf = await callTTS(apiKey, config, { model, text, voice: args.voice }, ctx);
             const dest = join(outDir, `${nowStamp()}.wav`);
             writeFileSync(dest, buf);
             const size = statSync(dest).size;
             ctx.outputs = [{ path: dest, bytes: size, sha256: sha256File(dest) }];
             ctx.ok = true;
-            return `已生成语音（model=${model}, ${(size / 1024).toFixed(1)}KB）：\n${dest}`;
+            const result = `已生成语音（model=${model}, ${(size / 1024).toFixed(1)}KB）：\n${dest}`;
+            recordCall(projectDir, "getbot_tts", args, result, ctx.outputs);
+            return result;
           } catch (e) {
             ctx.error = e.message;
             return `语音合成失败：${e.message}`;
@@ -1309,6 +1344,15 @@ export const GetbotPlugin = async ({ directory }) => {
               inputLength: text.length,
             };
 
+            // 短时去重：同样原文+方向在 60s 内重复 → 返回上次结果
+            const dedupHit = checkDedup(projectDir, "getbot_translate", args);
+            if (dedupHit) {
+              ctx.resolved = { ...ctx.resolved, dedupHit: true, dedupAgeMs: dedupHit.ageMs };
+              ctx.outputs = dedupHit.outputs;
+              ctx.ok = true;
+              return dedupHit.result;
+            }
+
             const out = await callTranslate(apiKey, config, {
               model, text, sourceLang: args.source_lang, targetLang: target,
             }, ctx);
@@ -1318,7 +1362,9 @@ export const GetbotPlugin = async ({ directory }) => {
             }
             ctx.outputs = [{ text: out, length: out.length }];
             ctx.ok = true;
-            return `[${model} → ${normalizeLang(target)}]\n${out}`;
+            const result = `[${model} → ${normalizeLang(target)}]\n${out}`;
+            recordCall(projectDir, "getbot_translate", args, result, ctx.outputs);
+            return result;
           } catch (e) {
             ctx.error = e.message;
             return `翻译失败：${e.message}`;
@@ -1403,6 +1449,63 @@ export const GetbotPlugin = async ({ directory }) => {
           } catch (e) {
             ctx.error = e.message;
             return `诊断失败：${e.message}`;
+          } finally {
+            finishLog(ctx);
+          }
+        },
+      }),
+
+      getbot_help: tool({
+        description: "返回 getbot 插件的完整使用说明 —— 包括所有 slash 命令、TTS 可用音色、当前默认模型、快捷键、排查入口。严格只调用 1 次。用户通过 /getbot-help 触发。",
+        args: {},
+        async execute() {
+          const config = loadConfig(projectDir);
+          const ctx = newLogContext(projectDir, "getbot_help", {}, config);
+          try {
+            const cache = loadCache(projectDir);
+            const defaults = cache?.defaults || {};
+            const defaultVoice = config?.defaults?.tts_voice || "Cherry";
+            const ttsModel = resolveDefault(cache, "tts", null, config) || "（无可用模型）";
+
+            const lines = [
+              "================ getbot 插件使用说明 ================",
+              "",
+              "可用 slash 命令（8 条）：",
+              "  /getbot-image     <描述>       文生图",
+              "  /getbot-tts       <文本>       文字转语音（WAV）",
+              "  /getbot-asr       <音频路径>   语音转文字",
+              "  /getbot-translate <文本>       中英互译（按原文自动判断方向）",
+              "  /getbot-md2html   <md 路径>    Markdown 转打印 HTML，浏览器里 Ctrl+P 另存 PDF",
+              "  /getbot-help                    本帮助",
+              "  /getbot-doctor                  环境诊断（缺依赖时给可拷贝给 AI 助理的安装提示）",
+              "  /getbot-logs                    打开调用日志文件夹",
+              "",
+              `TTS 可用音色（model=${ttsModel}）：`,
+              ...TTS_VOICES.map((v) => `  - ${v}${v === defaultVoice ? "  ← 默认" : ""}`),
+              "",
+              "TTS 用法：",
+              `  /getbot-tts 今天天气真好         （用默认音色 ${defaultVoice}）`,
+              `  对话里说 "用 Ethan 念：你好"   （指定音色）`,
+              "",
+              "当前默认模型：",
+              `  image     = ${defaults.image || "（无）"}`,
+              `  tts       = ${defaults.tts || "（无）"}`,
+              `  asr       = ${defaults.asr || "（无）"}`,
+              `  translate = ${defaults.translate || "（无）"}`,
+              "",
+              "快捷键：",
+              `  Ctrl+Shift+V  录音 ${config?.voice_input?.duration_sec || 30} 秒 → 转文字 → 复制到剪贴板`,
+              "",
+              "排查问题：",
+              "  /getbot-doctor   检查 Node / API Key / 模型缓存 / ffmpeg / ffprobe / 写权限",
+              "  /getbot-logs     打开日志文件夹（每天一个 JSONL，便于发给开发者排查）",
+            ];
+            ctx.resolved = { defaultsKeys: Object.keys(defaults), voiceCount: TTS_VOICES.length };
+            ctx.ok = true;
+            return lines.join("\n");
+          } catch (e) {
+            ctx.error = e.message;
+            return `生成使用说明失败：${e.message}`;
           } finally {
             finishLog(ctx);
           }
@@ -1625,3 +1728,8 @@ export const tui = async (api) => {
 
   lifecycle.onDispose(() => { try { unregister(); } catch {} });
 };
+
+// opencode 1.3.x 的类型签名 PluginModule.server: Plugin —— 用 `server` 别名 export 一份，
+// 确保 opencode 通过 import("<pkg>/server") 后取 `mod.server` 时能拿到本插件入口。
+// `tui` 同名已经对齐 TuiPluginModule.tui，不再额外别名。
+export const server = GetbotPlugin;
