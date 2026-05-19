@@ -591,24 +591,7 @@ function runDoctor(projectDir, config) {
     }
   }
 
-  // 5. xclip（仅 Linux）
-  if (process.platform === "linux") {
-    const xc = checkBinary("xclip", ["-version"]);
-    if (!xc.ok) {
-      issues.push({
-        id: "no_xclip",
-        title: "xclip 未找到",
-        affects: "TUI 语音输入识别后复制到剪贴板",
-        manualFix: "sudo apt install xclip / sudo dnf install xclip",
-        agentInstallable: true,
-        agentPackages: ["xclip"],
-      });
-    } else {
-      goods.push("✓ xclip 可用");
-    }
-  }
-
-  // 6. 输出目录可写（取个代表性的）
+  // 5. 输出目录可写（取个代表性的）
   try {
     const probe = join(projectDir, ".opencode", "tmp", "doctor_probe_" + Date.now());
     mkdirSync(dirname(probe), { recursive: true });
@@ -1429,7 +1412,7 @@ export const GetbotPlugin = async ({ directory }) => {
       }),
 
       getbot_doctor: tool({
-        description: "诊断 getbot 插件运行环境。检查 Node、API Key、模型缓存、ffmpeg/ffprobe、xclip（Linux）、写权限等依赖，对每个缺失项给出修复办法；同时把'AI 助理可代办的依赖安装'整合成一段拷贝即用的提示词。用户表达'跑下 getbot 诊断 / 看下环境 / 排查 getbot'时调用。",
+        description: "诊断 getbot 插件运行环境。检查 Node、API Key、模型缓存、ffmpeg/ffprobe、写权限等依赖，对每个缺失项给出修复办法；同时把'AI 助理可代办的依赖安装'整合成一段拷贝即用的提示词。用户表达'跑下 getbot 诊断 / 看下环境 / 排查 getbot'时调用。",
         args: {},
         async execute() {
           const config = loadConfig(projectDir);

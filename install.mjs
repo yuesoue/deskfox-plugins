@@ -331,14 +331,13 @@ function whichBinary(name) {
   return false;
 }
 
-// 安装末尾跑：检查 getbot 插件运行时依赖的二进制（ffmpeg/ffprobe/xclip），
+// 安装末尾跑：检查 getbot 插件运行时依赖的二进制（ffmpeg/ffprobe），
 // 缺什么列什么 + 生成可拷给 AI 助理的安装提示词。其他诊断项（API Key/cache/写权限）
 // install.mjs 自身流程已经覆盖（fetchModels 验 key、writeCache 验写权限），不在这里重复。
 function checkInstallDeps() {
   const missing = [];
   if (!whichBinary("ffmpeg")) missing.push("ffmpeg");
   else if (!whichBinary("ffprobe")) missing.push("ffprobe");  // 罕见，ffmpeg 装了但 ffprobe 没装
-  if (platform() === "linux" && !whichBinary("xclip")) missing.push("xclip");
   return missing;
 }
 
@@ -854,7 +853,7 @@ async function main() {
   const toolDefaults = writeCache(buckets, raw);
   log("✓ 模型分类缓存已写入 " + join(GLOBAL_DIR, "cache", "getbot-models.json"));
 
-  // 7. 检查运行时二进制依赖（ffmpeg/ffprobe/xclip）
+  // 7. 检查运行时二进制依赖（ffmpeg/ffprobe）
   const missingDeps = checkInstallDeps();
 
   // 8. 总结
@@ -879,7 +878,7 @@ async function main() {
     log(formatDepsInstallPrompt(missingDeps));
     log("");
   } else {
-    log("✓ 运行时依赖（ffmpeg / ffprobe" + (platform() === "linux" ? " / xclip" : "") + "）齐全");
+    log("✓ 运行时依赖（ffmpeg / ffprobe）齐全");
     log("");
   }
 
