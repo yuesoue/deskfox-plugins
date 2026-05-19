@@ -196,9 +196,19 @@ A: 直接装普通版会覆盖插件部分，但 provider.getbot 仍在 opencode
    里（只装不卸原则）—— 如果你不希望主聊天看到 getbot 模型，
    手动删 opencode.jsonc 的 provider.getbot 整块（或从 .bak 恢复）。
 
+Q: 我用的是 fork 版 OpenCode，已经在 UI 的"连接 provider"对话框
+   里装过 getbot 了，现在再跑本脚本会怎样？
+A: 本脚本会**自动检测**：如果 opencode.jsonc 里 provider.getbot.options.apiKey
+   已是非空字符串，**会跳过 provider 注入步骤**（不破坏你已有的配置 / 注释）。
+   插件本体（slash 命令 + 工具）该装的还是会装。如果你想用脚本重新注入
+   （比如想要"默认 5 个 + 22 个隐藏"的机制），先手动从 opencode.jsonc
+   移除 provider.getbot 整块（或清空 options.apiKey 字段），再跑本脚本。
+
 Q: /getbot-image 报 401 / 403 ?
-A: API Key 填错或已失效。重跑安装脚本，新 Key 会同时覆盖两份
-   存储（secret 文件 + opencode.jsonc 的 provider.getbot.options.apiKey）。
+A: API Key 填错或已失效。重跑安装脚本：
+   - secret 文件（插件本体用）会用新 Key 覆盖
+   - opencode.jsonc 里 provider.getbot.options.apiKey 已存在时**不会动**
+     —— 需要手动清空该字段再跑，或直接在 opencode.jsonc 里把新 Key 贴进去
 
 Q: /getbot-tts 或 /getbot-asr 报 "未检测到 ffmpeg"？
 A: 按前置条件装 ffmpeg。或对 AI 说"开 getbot 调试"。

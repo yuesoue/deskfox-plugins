@@ -15,9 +15,13 @@
  *
  * 同时会**自动 patch** ~/.config/opencode/opencode.jsonc：
  *   - 在 "plugin" 数组里追加 "file:///.../plugins/getbot"（字符串 patch，保留 jsonc 注释；幂等）
- *   - 写入 "provider.getbot.{name, npm, options.{baseURL, apiKey}, models}"
+ *   - 若 provider.getbot.options.apiKey **未配置**（不存在 / 空串），写入完整
+ *     provider.getbot.{name, npm, options.{baseURL, apiKey}, models}
  *     （JSON 重写，**会丢失原 jsonc 注释**；写入前自动备份到 opencode.jsonc.bak.<时间戳>）
- *   - apiKey 同时写两份：secret 文件（插件本体用）+ opencode.jsonc（主聊天 provider 用）
+ *   - 若 apiKey **已配置**（OpenCode app 的"连接 provider"装过 / 上次跑过本脚本）→ **跳过**
+ *     provider 注入步骤；不破坏已有配置，secret 文件该写还写
+ *   - apiKey 写两份：secret 文件（插件本体用，每次必写）+ opencode.jsonc 的
+ *     provider.getbot.options.apiKey（主聊天 provider 用，幂等跳过时不写）
  *   - 推荐 5 个模型不写 release_date → 默认显示在主聊天模型选择器
  *     其余 22+ 个写 release_date: "2020-01-01" → 默认隐藏（用户可在模型设置页手动开启）
  *
@@ -584,11 +588,35 @@ function mergeProvider(cfg, apiKey, chatIds, recommendedIds) {
   return { added, total: Object.keys(mergedModels).length };
 }
 
-// 调用入口：定位主配置文件路径 → 备份 → 合并 → 写回
+// 调用入口：定位主配置文件路径 → 幂等检测 → 备份 → 合并 → 写回
+//
+// 幂等检测：判断标准是"provider.getbot.options.apiKey 是否已是非空字符串"，
+// 不是"provider.getbot 块是否存在"。这样能正确处理：
+//   - opencode-fork 内置 getbot UI 支持但用户没在 UI 连接过（jsonc 无块）→ 注入
+//   - fork 写过 stub 但 key 为空（理论可能，当前 fork 不会这样）→ 注入帮填 key
+//   - 用户用 UI 完整连接过（block + key 都齐）→ 跳过，避免破坏 jsonc 注释 / 改用户配置
+//   - 用过本脚本（block + key 都齐）→ 跳过
+//
+// disabled_providers：在"key 已配置"时不动；在"未配置 → 注入"时由 mergeProvider 顺手清掉
+// "getbot" 项（因为用户既然来跑本脚本就是想用 getbot，禁用标记应清）。
 function injectProvider(apiKey, chatIds, recommendedIds) {
   const cfgPath = findOrCreateOpencodeConfig();
   const existed = existsSync(cfgPath);
   const cfg = loadOpencodeConfigJson(cfgPath);
+
+  // 幂等检测
+  const existingKey = cfg.provider?.getbot?.options?.apiKey;
+  const keyConfigured = typeof existingKey === "string" && existingKey.trim().length > 0;
+  if (keyConfigured) {
+    const modelCount = Object.keys(cfg.provider.getbot.models || {}).length;
+    log(`  ✓ 检测到 opencode.jsonc 已配置 provider.getbot（${modelCount} 个模型，含 apiKey），跳过注入`);
+    log(`    （由 OpenCode app 的"连接 provider"或上次本脚本写入）`);
+    log(`    本脚本不会破坏已有配置；如需重新注入，请手动从 opencode.jsonc 移除`);
+    log(`    provider.getbot 整块（或清空 options.apiKey 字段），再跑本脚本。`);
+    return { skipped: true, total: modelCount, added: 0 };
+  }
+
+  // 注入路径
   const result = mergeProvider(cfg, apiKey, chatIds, recommendedIds);
   const text = JSON.stringify(cfg, null, 2) + "\n";
   let bak = null;
@@ -805,17 +833,22 @@ async function main() {
   patchOpencodeJsoncAdd();
 
   // 4.6 注入 provider.getbot 到 opencode.jsonc（JSON 重写，会丢注释，写入前自动备份）
-  const recommendedIds = pickRecommended(buckets.chat, 5);
+  //     幂等：若已配置 apiKey 则整段跳过；推荐 5 个 / 22 个隐藏 只在真正注入时打印
   log("→ 注入 provider.getbot 到 opencode 主配置 ...");
-  log("  推荐 5 个模型（默认在主聊天选择器显示）：");
-  for (const id of recommendedIds) log(`    ✨ ${id}`);
-  log(`  其他 ${Math.max(0, buckets.chat.length - recommendedIds.length)} 个 chat 模型默认隐藏（用户可在模型设置页手动开启）`);
+  const recommendedIds = pickRecommended(buckets.chat, 5);
   const providerResult = injectProvider(apiKey, buckets.chat, recommendedIds);
+  if (!providerResult.skipped) {
+    log("  推荐 5 个模型（默认在主聊天选择器显示）：");
+    for (const id of recommendedIds) log(`    ✨ ${id}`);
+    log(`  其他 ${Math.max(0, buckets.chat.length - recommendedIds.length)} 个 chat 模型默认隐藏（用户可在模型设置页手动开启）`);
+  }
 
   // 5. 同时写 secret 文件（插件本体用，独立 key 副本；与 opencode.jsonc 的 provider key 互不干扰）
   log("→ 保存 API Key 到 " + SECRET_PATH + " ...");
   writeSecret(apiKey);
-  log("✓ apiKey 已保存到 secret 文件（插件本体用）+ opencode.jsonc 的 provider.getbot.options.apiKey（主聊天 provider 用）");
+  log(providerResult.skipped
+    ? `✓ apiKey 已保存到 secret 文件（插件本体用）；opencode.jsonc 已有 provider key 未动`
+    : `✓ apiKey 已保存到 secret 文件（插件本体用）+ opencode.jsonc 的 provider.getbot.options.apiKey（主聊天 provider 用）`);
 
   // 6. 写缓存
   const toolDefaults = writeCache(buckets, raw);
