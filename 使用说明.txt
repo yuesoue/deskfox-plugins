@@ -1,0 +1,220 @@
+==============================================================
+  getbot.me × OpenCode 插件安装包（**provider 版**）
+==============================================================
+
+这个版本相比普通版（getbot-opencode）**多做一件事**：把 getbot.me
+作为 provider 注入到 OpenCode 主聊天的模型选择器里。装完之后：
+
+  · 主聊天底部模型选择器多出 5 个推荐 getbot 模型（默认显示）
+  · 另外 22+ 个 chat 模型默认隐藏，可在 OpenCode 设置 → 模型 里
+    打开开关，让它们出现在聊天选择器里
+  · 同时保留**六个斜杠命令**（与普通版相同）：
+      /getbot-image     文生图
+      /getbot-tts       语音合成
+      /getbot-asr       语音识别
+      /getbot-translate 中英互译（按原文自动判断方向）
+      /getbot-md2html   Markdown → A4 打印排版 HTML
+      /getbot-help      使用说明（命令清单 / TTS 音色 / 默认模型 / 排查入口）
+
+注意：本版与普通版 getbot-opencode 是同一插件的两个变体，**互斥安装**。
+任何一方已装的情况下安装另一方 → 直接覆盖（等同于"已装情况下重新安装"）。
+
+--------------------------------------------------------------
+【provider 版的核心差别】
+--------------------------------------------------------------
+
+相比普通版，本版安装时会**额外**修改 opencode.jsonc：
+
+  1) 在 plugin 数组里加一条本插件登记（与普通版相同，字符串 patch 保留注释）
+
+  2) 写入 provider.getbot 块（**本版独有**）：
+       provider.getbot = {
+         name: "getbot",
+         npm: "@ai-sdk/openai-compatible",
+         options: { baseURL, apiKey },
+         models: { ...27 个 chat 模型 }
+       }
+
+     ⚠ 这一步是 JSON 重写，**会丢失原 opencode.jsonc 里所有注释和格式**。
+     安装脚本会先把原文件备份到 opencode.jsonc.bak.<时间戳>，
+     如果原文件有重要注释，可从备份恢复。
+
+  3) API Key 同时存两份（互不干扰）：
+       插件本体用 → ~/.config/opencode/config/getbot-secret.json
+       主聊天 provider 用 → opencode.jsonc 的 provider.getbot.options.apiKey
+     更新 Key 时再跑一次安装脚本，两份会同时覆盖。
+
+--------------------------------------------------------------
+【前置条件】
+--------------------------------------------------------------
+
+1. 已装 OpenCode 桌面 app：https://opencode.ai
+
+2. 已装 Node.js（18 及以上）
+     Windows:  https://nodejs.org 下 LTS 版一路下一步
+     macOS:    brew install node
+     Linux:    sudo apt install nodejs npm
+
+3. ffmpeg（语音合成 / 语音识别 / 语音输入用）
+     Windows:  winget install Gyan.FFmpeg
+     macOS:    brew install ffmpeg
+     Linux:    sudo apt install ffmpeg
+
+   不装也能装插件，安装脚本会自动检测并打印一段「AI 助理可代办的
+   安装提示词」，复制给任意 AI 助理（包括 OpenCode 本身）即可让
+   它自动跑包管理器装上。
+
+4. 去 https://getbot.me 注册并拿一个 API Key（sk- 开头）
+
+--------------------------------------------------------------
+【安装步骤】
+--------------------------------------------------------------
+
+1. 把整个文件夹解压到任意位置（别删，卸载时还要用）
+
+2. 双击：
+     Windows  →  一键安装.bat
+     macOS    →  install.command
+                （若提示"无法打开"：右键 → 打开，或终端里跑
+                  bash install.command）
+
+3. 弹出窗口会提示：
+     请粘贴 getbot.me API Key：
+   粘贴 sk-xxxxxxxxx 回车即可。
+
+4. 安装结束会显示：
+     ✅ 安装完成
+     已注册 6 个斜杠命令 ...
+     推荐 5 个模型（默认在主聊天选择器显示）：
+       ✨ ...
+       ✨ ...
+     其他 22 个 chat 模型默认隐藏（用户可在模型设置页手动开启）
+
+5. 【重要】完全退出 OpenCode 桌面 app（**托盘图标也要退**），
+    然后重开。不然配置不会生效。
+
+6. 重开后：
+     · 主聊天底部模型选择器 → 看到 5 个推荐 getbot 模型，可直接选
+     · OpenCode 设置 → 模型 → 找到其他 getbot 模型 → 点开关启用
+     · 输 / 看 /getbot-* 斜杠命令
+
+--------------------------------------------------------------
+【使用示例】
+--------------------------------------------------------------
+
+主聊天里直接选 getbot 模型对话 —— 跟用任何其他 provider 模型一样。
+
+斜杠命令（与普通版相同）：
+
+  /getbot-image 一只戴眼镜的橘猫在键盘上打字，扁平插画风
+    → 图片存到当前项目的 getbot.me/image/ 下
+
+  /getbot-tts 你好这是一段测试
+    → 生成 wav，存到 getbot.me/audio/
+    → 想换音色：对 AI 说"用 Ethan 念：你好"
+
+  /getbot-asr 录音.m4a
+    → 转录文字存为同名 .txt
+
+  /getbot-translate Hello, this is a test.
+    → 自动判断英→中
+
+  /getbot-md2html D:\docs\报告.md
+    → 生成打印排版 HTML，浏览器里 Ctrl+P 另存为 PDF
+
+  /getbot-help
+    → 生成 HTML 帮助页并在浏览器打开（含命令清单、TTS 音色、默认模型、
+      排查路径），聊天框里只返回一行短文本
+
+--------------------------------------------------------------
+【出问题怎么办（Debug 模式）】
+--------------------------------------------------------------
+
+插件默认不写日志（避免长期跑下来日志膨胀）。遇到问题时按这个流程：
+
+  1) 对 AI 说："开 getbot 调试"
+     → 自动打开 debug 日志 + 跑一次环境诊断
+
+  2) 复现你遇到的问题
+
+  3) 对 AI 说："打开 getbot 日志文件夹"
+     → 把今日的 JSONL 日志发给开发者
+
+  4) 排查完成后对 AI 说："关闭 getbot 调试"
+
+--------------------------------------------------------------
+【卸载（⚠ 关键差别）】
+--------------------------------------------------------------
+
+双击：
+  Windows  →  一键卸载.bat
+  macOS    →  uninstall.command
+
+或命令行：
+    node install.mjs --uninstall
+
+**只清"插件部分"**：
+  ~/.config/opencode/plugins/getbot/         （插件包目录）
+  ~/.config/opencode/command/getbot-*.md      （6 个斜杠命令）
+  ~/.config/opencode/cache/getbot-models.json
+  ~/.config/opencode/config/getbot-secret.json（插件本体的 apiKey）
+  opencode.jsonc 的 plugin 数组里本插件登记
+
+**不会**清理（视为独立事项，只装不卸）：
+  opencode.jsonc 的 provider.getbot 整块
+    —— 包括注入的 27 个 chat 模型 + apiKey
+    —— 如需清理，请手动改 opencode.jsonc，或从安装时的
+       opencode.jsonc.bak.<时间戳> 备份恢复
+
+  config/getbot.json（保留你手调的参数）
+
+这样设计是为了语义清晰：插件本体可以独立装卸，但一旦把 getbot
+作为 provider 注入到主聊天，它就等同你手动加的 provider，需要的
+话自己手动改，避免卸载时误删用户后续手调的内容。
+
+--------------------------------------------------------------
+【常见问题】
+--------------------------------------------------------------
+
+Q: 主聊天模型选择器里没出现 getbot 模型？
+A: 1) 确认托盘里的 OpenCode 也退了，并重开
+   2) 检查 ~/.config/opencode/opencode.jsonc 里有 provider.getbot 块
+   3) 推荐 5 个之外的模型，要在 OpenCode 设置 → 模型 里手动 toggle
+
+Q: 模型选择器里只有 5 个？我想看到更多 / 全部 27 个？
+A: OpenCode 设置 → 模型 → 找到 getbot 下的其他模型 → 点开关启用。
+   这是 OpenCode 的"按 release_date 默认隐藏"机制，本版给非推荐
+   模型设了一个 2020 年的 release_date 让它们默认隐藏，但用户
+   可以自由开启。
+
+Q: 装好后想把模型选择器恢复成"全部默认显示"？
+A: 编辑 opencode.jsonc 里 provider.getbot.models 下每个模型，
+   删掉 release_date 字段即可。
+
+Q: 装了 provider 版又想换回普通版？
+A: 直接装普通版会覆盖插件部分，但 provider.getbot 仍在 opencode.jsonc
+   里（只装不卸原则）—— 如果你不希望主聊天看到 getbot 模型，
+   手动删 opencode.jsonc 的 provider.getbot 整块（或从 .bak 恢复）。
+
+Q: /getbot-image 报 401 / 403 ?
+A: API Key 填错或已失效。重跑安装脚本，新 Key 会同时覆盖两份
+   存储（secret 文件 + opencode.jsonc 的 provider.getbot.options.apiKey）。
+
+Q: /getbot-tts 或 /getbot-asr 报 "未检测到 ffmpeg"？
+A: 按前置条件装 ffmpeg。或对 AI 说"开 getbot 调试"。
+
+--------------------------------------------------------------
+【安全说明】
+--------------------------------------------------------------
+
+API Key 在两个位置都是明文保存：
+  ~/.config/opencode/config/getbot-secret.json    （插件本体用）
+  ~/.config/opencode/opencode.jsonc                （主聊天 provider 用）
+
+两个文件都在你的个人用户目录下，只有你和管理员能读。切勿把这
+两个文件传给别人或提交到公共仓库。
+
+注意：opencode.jsonc 现在也含 apiKey 了，分享 / 版本化 opencode.jsonc
+之前请确认已去掉 provider.getbot.options.apiKey 字段。
+
+更新 Key：再跑一次安装脚本，它会同时覆盖两份。
