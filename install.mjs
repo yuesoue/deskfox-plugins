@@ -229,7 +229,7 @@ function banner() {
   log("==============================================================");
   log("  getbot.me × OpenCode 一键安装");
   log("  把 getbot.me 中转的 Qwen/GPT/Claude 等模型接入 OpenCode 桌面 app");
-  log("  新增：/getbot-image /getbot-tts /getbot-asr /getbot-md2html + Ctrl+Shift+V");
+  log("  新增 slash 命令：/getbot-image /getbot-tts /getbot-asr /getbot-translate /getbot-md2html /getbot-help");
   log("==============================================================");
   log("");
 }
@@ -546,6 +546,8 @@ function uninstallTargets() {
     join(GLOBAL_DIR, "command", "getbot-asr.md"),
     join(GLOBAL_DIR, "command", "getbot-translate.md"),
     join(GLOBAL_DIR, "command", "getbot-md2html.md"),
+    join(GLOBAL_DIR, "command", "getbot-help.md"),
+    // 老版本兼容（v1 曾有但已删除的 slash 命令文件）
     join(GLOBAL_DIR, "command", "getbot-doctor.md"),
     join(GLOBAL_DIR, "command", "getbot-logs.md"),
     // 缓存 + secret
@@ -695,13 +697,12 @@ async function main() {
   log(`  /getbot-translate 中英互译  默认模型 → ${toolDefaults.translate || "（无可用模型）"}`);
   log(`  /getbot-md2html   MD 转打印排版 HTML（在浏览器里 Ctrl+P 另存 PDF）`);
   log(`  /getbot-help      使用说明（命令清单 / TTS 音色 / 默认模型 / 排查入口）`);
-  log("快捷键：Ctrl+Shift+V → 录音 30s → 自动转文字插入输入框");
   log("排查：遇到问题时对 AI 说\"开 getbot 调试\"，会打开 debug 日志 + 跑环境诊断");
   log("");
 
   if (missingDeps.length) {
     log(`⚠  检测到缺少 ${missingDeps.length} 个运行时依赖：${missingDeps.join(", ")}`);
-    log("   插件本体已装好，但语音相关功能（ASR / 录音输入）将受限。");
+    log("   插件本体已装好，但 /getbot-asr 功能将受限（依赖 ffmpeg / ffprobe 做音频预处理与分片）。");
     log(formatDepsInstallPrompt(missingDeps));
     log("");
   } else {

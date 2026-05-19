@@ -11,7 +11,6 @@
       /getbot-translate 中英互译（按原文自动判断方向）
       /getbot-md2html   Markdown → A4 打印排版 HTML（要 PDF 在浏览器里 Ctrl+P 另存）
       /getbot-help      使用说明（命令清单 / TTS 音色 / 默认模型 / 排查入口）
-  · 快捷键 Ctrl+Shift+V ：录音 30 秒 → 自动转文字写入输入框
 
 说明：插件配置的模型只服务于上面这些斜杠命令，不会出现在 OpenCode
 主聊天界面的模型选择器里。安装脚本会自动登记到 opencode.jsonc 的
@@ -84,7 +83,8 @@ plugin 数组（自动备份原文件）。
     → 转录文字存为同名 .txt
 
   /getbot-translate Hello, this is a test.
-    → 自动判断英→中，原地输出译文
+    → 自动判断英→中，短文本直接输出到聊天
+    → 译文超过 500 字符自动写到 getbot.me/translate/ 下的 .md 文件
   /getbot-translate 你好，这是测试
     → 自动判断中→英
 
@@ -94,10 +94,8 @@ plugin 数组（自动备份原文件）。
     → 输出存到 getbot.me/html/
 
   /getbot-help
-    → 显示完整命令清单、TTS 可用音色、当前默认模型、排查路径
-
-  Ctrl+Shift+V
-    → 说话 30 秒 → 自动写入输入框
+    → 生成 HTML 帮助页并在浏览器打开（含命令清单、TTS 音色、默认模型、
+      排查路径），聊天框里只返回一行短文本
 
 --------------------------------------------------------------
 【出问题怎么办（Debug 模式）】
@@ -161,12 +159,8 @@ Q: /getbot-tts 或 /getbot-asr 报 "未检测到 ffmpeg"？
 A: 按前置条件装 ffmpeg。或对 AI 说"开 getbot 调试"，诊断会给
    一段可拷的 AI 自动安装提示词。
 
-Q: Ctrl+Shift+V 录音没反应？
-A: 检查麦克风权限（macOS：系统设置 → 隐私与安全性 → 麦克风 →
-   允许 OpenCode）。Windows 一般不用特别配。
-
 Q: 我想看完整命令清单和当前默认模型？
-A: 在 OpenCode 聊天框里输 /getbot-help
+A: 在 OpenCode 聊天框里输 /getbot-help（会自动在浏览器打开 HTML 版）
 
 --------------------------------------------------------------
 【安全说明】

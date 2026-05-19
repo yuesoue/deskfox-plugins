@@ -2,9 +2,10 @@
  * OpenCode getbot.me 插件
  *
  * 双导出：
- *   - GetbotPlugin (server)：4 个多模态工具
- *     getbot_image / getbot_tts / getbot_asr / getbot_md2html
- *   - tui：命令面板条目（切换各模态默认模型、刷新模型列表） + Ctrl+Shift+V 语音输入
+ *   - GetbotPlugin (server)：多模态工具 + 控制工具
+ *     getbot_image / getbot_tts / getbot_asr / getbot_translate / getbot_md2html
+ *     + getbot_help / getbot_doctor / getbot_logs / getbot_debug
+ *   - tui：命令面板条目（切换各模态默认模型、刷新模型列表）
  *
  * 使用前请先运行：node install.mjs [sk-xxxx]
  * 安装期会自动检查 ffmpeg 等运行时依赖；遇到问题时对 AI 说"开 getbot 调试"即可记日志 + 跑诊断。
@@ -920,6 +921,28 @@ function mdBaseHref(mdPath) {
   return "file://" + dir + "/";
 }
 
+// 通用：把 markdown 字符串渲染成自包含 HTML（不引用外部资源），用于 help / debug 等
+// 与 convertMdToPrintHtml 的差别：不读文件、不需要 base href（不显示外部图片）、不带打印工具栏
+async function renderMarkdownToHtml(mdText, title) {
+  const markedUrl = new URL("./marked.mjs", import.meta.url);
+  const { marked } = await import(markedUrl.href);
+  const bodyHtml = marked.parse(mdText, { breaks: true, gfm: true });
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>${escapeHtml(title)}</title>
+<style>${PRINT_CSS}</style>
+</head>
+<body>
+<div class="page">
+${bodyHtml}
+</div>
+</body>
+</html>
+`;
+}
+
 async function convertMdToPrintHtml(mdPath, outDir) {
   const markedUrl = new URL("./marked.mjs", import.meta.url);
   const { marked } = await import(markedUrl.href);
@@ -1003,33 +1026,6 @@ function runCmd(cmd, args, opts = {}) {
   });
 }
 
-function detectWindowsMicDevice() {
-  try {
-    const r = spawnSync("ffmpeg", ["-list_devices", "true", "-f", "dshow", "-i", "dummy"], { env: ffmpegEnv(), encoding: "utf-8" });
-    const out = (r.stderr || "") + (r.stdout || "");
-    const audioSection = out.split(/DirectShow audio devices/i)[1] || "";
-    const m = audioSection.match(/"([^"]+)"/);
-    if (m) return m[1];
-  } catch {}
-  return "麦克风";
-}
-
-async function recordAudio(outputPath, durationSec = 30) {
-  const args = ["-y"];
-  if (process.platform === "win32") {
-    const device = detectWindowsMicDevice();
-    args.push("-f", "dshow", "-i", `audio=${device}`);
-  } else if (process.platform === "darwin") {
-    args.push("-f", "avfoundation", "-i", ":0");
-  } else {
-    args.push("-f", "alsa", "-i", "default");
-  }
-  args.push("-t", String(durationSec), "-ar", "16000", "-ac", "1", outputPath);
-  // 录音超时 = duration + 10 秒余量；防止 ffmpeg 被设备占用永远不退出
-  await runCmd("ffmpeg", args, { timeoutMs: (durationSec + 10) * 1000 });
-  return outputPath;
-}
-
 async function probeDurationSec(audioPath) {
   try {
     const r = await runCmd("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audioPath], { timeoutMs: 10000 });
@@ -1058,36 +1054,6 @@ async function splitAudio(audioPath, chunkSec, outDir) {
   return glob;
 }
 
-// ========== 剪贴板 ==========
-
-async function copyToClipboard(text) {
-  const plat = process.platform;
-  if (plat === "win32") {
-    await new Promise((resolve, reject) => {
-      const p = spawn("clip", [], { stdio: ["pipe", "ignore", "ignore"] });
-      p.on("error", reject);
-      p.on("close", () => resolve());
-      p.stdin.write(text, "utf-8");
-      p.stdin.end();
-    });
-  } else if (plat === "darwin") {
-    await new Promise((resolve, reject) => {
-      const p = spawn("pbcopy", [], { stdio: ["pipe", "ignore", "ignore"] });
-      p.on("error", reject);
-      p.on("close", () => resolve());
-      p.stdin.write(text, "utf-8");
-      p.stdin.end();
-    });
-  } else {
-    await new Promise((resolve, reject) => {
-      const p = spawn("xclip", ["-selection", "clipboard"], { stdio: ["pipe", "ignore", "ignore"] });
-      p.on("error", reject);
-      p.on("close", () => resolve());
-      p.stdin.write(text, "utf-8");
-      p.stdin.end();
-    });
-  }
-}
 
 // ========== Server Plugin：4 个工具 ==========
 
@@ -1365,9 +1331,38 @@ export const GetbotPlugin = async ({ directory }) => {
               ctx.error = "模型未返回内容";
               return "翻译失败：模型未返回内容";
             }
-            ctx.outputs = [{ text: out, length: out.length }];
+            // 长译文（> 500 字符）自动写文件，避免聊天框膨胀；短译文仍只返回字符串
+            const LONG_THRESHOLD = 500;
+            let savedPath = null;
+            if (out.length > LONG_THRESHOLD) {
+              const outDir = resolveOutputDir(projectDir, config, "translate", "getbot.me/translate");
+              savedPath = join(outDir, `translate_${nowStamp()}.md`);
+              const mdBody = [
+                `# ${normalizeLang(target)} 译文`,
+                "",
+                `- **模型**：\`${model}\``,
+                `- **原文长度**：${text.length} 字符`,
+                `- **译文长度**：${out.length} 字符`,
+                `- **生成时间**：${new Date().toISOString()}`,
+                "",
+                "## 原文",
+                "",
+                text,
+                "",
+                "## 译文",
+                "",
+                out,
+              ].join("\n");
+              writeFileSync(savedPath, mdBody, "utf-8");
+            }
+            ctx.outputs = savedPath
+              ? [{ text: out, length: out.length, path: savedPath, bytes: out.length }]
+              : [{ text: out, length: out.length }];
             ctx.ok = true;
-            const result = `[${model} → ${normalizeLang(target)}]\n${out}`;
+            const header = `[${model} → ${normalizeLang(target)}]`;
+            const result = savedPath
+              ? `${header}\n（译文较长，已写入：${savedPath}）\n\n${out.slice(0, 200)}${out.length > 200 ? "..." : ""}`
+              : `${header}\n${out}`;
             recordCall(projectDir, "getbot_translate", args, result, ctx.outputs);
             return result;
           } catch (e) {
@@ -1461,7 +1456,7 @@ export const GetbotPlugin = async ({ directory }) => {
       }),
 
       getbot_help: tool({
-        description: "返回 getbot 插件的完整使用说明 —— 包括所有 slash 命令、TTS 可用音色、当前默认模型、快捷键、排查入口。严格只调用 1 次。用户通过 /getbot-help 触发。仅在用户主动询问帮助时调用，不要在其他工具调用前自动调用。",
+        description: "生成 getbot 插件使用说明的 HTML 文件并在浏览器打开（含命令清单 / TTS 音色 / 默认模型 / 排查入口）。返回值仅 1 行短文本（已打开 + 文件路径），节省 token。严格只调用 1 次。用户通过 /getbot-help 触发；仅在用户主动询问帮助时调用，不要在其他工具调用前自动调用。",
         args: {},
         async execute() {
           const config = loadConfig(projectDir);
@@ -1471,45 +1466,65 @@ export const GetbotPlugin = async ({ directory }) => {
             const defaults = cache?.defaults || {};
             const defaultVoice = config?.defaults?.tts_voice || "Cherry";
             const ttsModel = resolveDefault(cache, "tts", null, config) || "（无可用模型）";
-
             const debugOn = !!config?.debug;
-            const lines = [
-              "================ getbot 插件使用说明 ================",
+
+            const md = [
+              "# getbot 插件使用说明",
               "",
-              "可用 slash 命令（6 条）：",
-              "  /getbot-image     <描述>       文生图",
-              "  /getbot-tts       <文本>       文字转语音（WAV）",
-              "  /getbot-asr       <音频路径>   语音转文字",
-              "  /getbot-translate <文本>       中英互译（按原文自动判断方向）",
-              "  /getbot-md2html   <md 路径>    Markdown 转打印 HTML，浏览器里 Ctrl+P 另存 PDF",
-              "  /getbot-help                    本帮助",
+              "## 可用 slash 命令（6 条）",
               "",
-              `TTS 可用音色（model=${ttsModel}）：`,
-              ...TTS_VOICES.map((v) => `  - ${v}${v === defaultVoice ? "  ← 默认" : ""}`),
+              "| 命令 | 用途 |",
+              "|---|---|",
+              "| `/getbot-image <描述>` | 文生图 |",
+              "| `/getbot-tts <文本>` | 文字转语音（WAV） |",
+              "| `/getbot-asr <音频路径>` | 语音转文字 |",
+              "| `/getbot-translate <文本>` | 中英互译（按原文自动判断方向；超过 500 字符自动写文件） |",
+              "| `/getbot-md2html <md 路径>` | Markdown 转打印 HTML，浏览器里 Ctrl+P 另存 PDF |",
+              "| `/getbot-help` | 本帮助 |",
               "",
-              "TTS 用法：",
-              `  /getbot-tts 今天天气真好         （用默认音色 ${defaultVoice}）`,
-              `  对话里说 "用 Ethan 念：你好"   （指定音色）`,
+              "底层工具仅 LLM 可调（无 slash 入口）：`getbot_doctor` / `getbot_logs` / `getbot_debug` —— 对 AI 用自然语言唤起即可。",
               "",
-              "当前默认模型：",
-              `  image     = ${defaults.image || "（无）"}`,
-              `  tts       = ${defaults.tts || "（无）"}`,
-              `  asr       = ${defaults.asr || "（无）"}`,
-              `  translate = ${defaults.translate || "（无）"}`,
+              `## TTS 可用音色（model = \`${ttsModel}\`）`,
               "",
-              "快捷键：",
-              `  Ctrl+Shift+V  录音 ${config?.voice_input?.duration_sec || 30} 秒 → 转文字 → 复制到剪贴板`,
+              ...TTS_VOICES.map((v) => `- **${v}**${v === defaultVoice ? "  ← 默认" : ""}`),
               "",
-              "排查问题（默认不写日志，按需开启）：",
-              `  当前 debug 状态：${debugOn ? "✓ 已开启（工具调用会写 JSONL 日志）" : "✗ 已关闭"}`,
-              "  ① 对 AI 说\"开 getbot 调试\"   → 打开 debug + 跑一次环境诊断",
-              "  ② 复现你遇到的问题",
-              "  ③ 对 AI 说\"打开 getbot 日志文件夹\"   → 把今日 JSONL 发给开发者",
-              "  ④ 排查完毕对 AI 说\"关闭 getbot 调试\"   → 避免日志膨胀",
-            ];
-            ctx.resolved = { defaultsKeys: Object.keys(defaults), voiceCount: TTS_VOICES.length };
+              "### TTS 用法",
+              "",
+              `- \`/getbot-tts 今天天气真好\`（用默认音色 ${defaultVoice}）`,
+              `- 对话里说"用 Ethan 念：你好"（指定音色）`,
+              "",
+              "## 当前默认模型",
+              "",
+              "| 类型 | 模型 |",
+              "|---|---|",
+              `| image | ${defaults.image || "（无）"} |`,
+              `| tts | ${defaults.tts || "（无）"} |`,
+              `| asr | ${defaults.asr || "（无）"} |`,
+              `| translate | ${defaults.translate || "（无）"} |`,
+              "",
+              "## 排查问题（默认不写日志，按需开启）",
+              "",
+              `**当前 debug 状态**：${debugOn ? "✓ 已开启（工具调用会写 JSONL 日志）" : "✗ 已关闭"}`,
+              "",
+              `1. 对 AI 说 **"开 getbot 调试"** → 打开 debug + 跑一次环境诊断`,
+              `2. 复现你遇到的问题`,
+              `3. 对 AI 说 **"打开 getbot 日志文件夹"** → 把今日 JSONL 发开发者`,
+              `4. 排查完毕对 AI 说 **"关闭 getbot 调试"** → 避免日志膨胀`,
+            ].join("\n");
+
+            const html = await renderMarkdownToHtml(md, "getbot 插件使用说明");
+            const outDir = join(GLOBAL_OC_DIR, "cache");
+            const outPath = join(outDir, "getbot-help.html");
+            mkdirSync(outDir, { recursive: true });
+            writeFileSync(outPath, html, "utf-8");
+            const opened = openInBrowser(outPath);
+
+            ctx.resolved = { defaultsKeys: Object.keys(defaults), voiceCount: TTS_VOICES.length, htmlPath: outPath };
+            ctx.outputs = [{ path: outPath, opened }];
             ctx.ok = true;
-            return lines.join("\n");
+            return opened
+              ? `✓ getbot 帮助已在浏览器打开：${outPath}`
+              : `getbot 帮助已生成：${outPath}\n（自动打开浏览器失败，请手动打开）`;
           } catch (e) {
             ctx.error = e.message;
             return `生成使用说明失败：${e.message}`;
@@ -1556,7 +1571,7 @@ export const GetbotPlugin = async ({ directory }) => {
       }),
 
       getbot_debug: tool({
-        description: "打开/关闭 getbot 插件的调试模式（debug）。开启后所有工具调用都会写 JSONL 日志到 ~/.config/opencode/cache/logs/，并立即跑一次环境诊断；关闭后停止写新日志（已有文件保留）。用户表达'开/关 getbot 调试 / 排查 getbot / getbot 出问题了'时调用。修改 ~/.config/opencode/config/getbot.json 的 debug 字段，立即生效，不需要重启。",
+        description: "打开/关闭 getbot 插件的调试模式（debug）。开启后所有工具调用都会写 JSONL 日志到 ~/.config/opencode/cache/logs/，并立即跑一次环境诊断 + 生成 HTML 报告在浏览器打开（节省 token）；关闭后停止写新日志（已有文件保留）。用户表达'开/关 getbot 调试 / 排查 getbot / getbot 出问题了'时调用。修改 ~/.config/opencode/config/getbot.json 的 debug 字段，立即生效，不需要重启。",
         args: {
           enable: tool.schema.boolean().describe("true 打开 debug 模式并跑一次诊断；false 关闭"),
         },
@@ -1569,40 +1584,69 @@ export const GetbotPlugin = async ({ directory }) => {
           try { mkdirSync(dirname(cfgPath), { recursive: true }); } catch {}
           writeFileSync(cfgPath, JSON.stringify(raw, null, 2) + "\n", "utf-8");
 
-          const lines = [];
-          if (newDebug) {
-            lines.push("✓ getbot 调试模式已**开启**");
-            lines.push("");
-            lines.push(`配置文件：${cfgPath}`);
-            lines.push(`日志文件夹：${logDir()}`);
-            lines.push(`今日日志：${logFilePath()}`);
-            lines.push("");
-            lines.push("接下来：");
-            lines.push("  ① 复现你遇到的问题（再试一次出错的命令）");
-            lines.push("  ② 把今日日志文件发给开发者（对 AI 说\"打开 getbot 日志文件夹\"）");
-            lines.push("  ③ 排查完成后请对 AI 说\"关闭 getbot 调试\"，避免日志膨胀");
-            lines.push("");
-            lines.push("============ 顺便：当前环境诊断 ============");
-            lines.push("");
-            try {
-              const report = runDoctor(projectDir, { ...raw });
-              lines.push(formatDoctorReport(report));
-            } catch (e) {
-              lines.push(`（诊断失败，但 debug 开关已生效）：${e.message}`);
-            }
-          } else {
-            lines.push("✓ getbot 调试模式已**关闭**");
-            lines.push("");
-            lines.push(`后续工具调用不再写日志。已生成的日志文件保留在：${logDir()}`);
+          if (!newDebug) {
+            // 关闭：纯文本返回即可（简单动作，不需要 HTML）
+            return [
+              "✓ getbot 调试模式已**关闭**",
+              "",
+              `后续工具调用不再写日志。已生成的日志文件保留在：${logDir()}`,
+            ].join("\n");
           }
-          return lines.join("\n");
+
+          // 开启：生成 HTML 报告 + 浏览器打开
+          let diagnosticReport = "";
+          try {
+            const report = runDoctor(projectDir, { ...raw });
+            diagnosticReport = formatDoctorReport(report);
+          } catch (e) {
+            diagnosticReport = `（诊断失败，但 debug 开关已生效）：${e.message}`;
+          }
+
+          const md = [
+            "# getbot 调试模式已开启 ✓",
+            "",
+            "## 当前状态",
+            "",
+            `- **配置文件**：\`${cfgPath}\``,
+            `- **日志文件夹**：\`${logDir()}\``,
+            `- **今日日志**：\`${logFilePath()}\``,
+            "",
+            "## 接下来",
+            "",
+            `1. 复现你遇到的问题（再试一次出错的命令）`,
+            `2. 把今日日志文件发给开发者（对 AI 说 **"打开 getbot 日志文件夹"**）`,
+            `3. 排查完成后请对 AI 说 **"关闭 getbot 调试"**，避免日志膨胀`,
+            "",
+            "## 当前环境诊断",
+            "",
+            "```text",
+            diagnosticReport,
+            "```",
+          ].join("\n");
+
+          let outPath = null;
+          let opened = false;
+          try {
+            const html = await renderMarkdownToHtml(md, "getbot 调试模式 - 环境诊断");
+            const outDir = join(GLOBAL_OC_DIR, "cache");
+            outPath = join(outDir, `getbot-debug-${nowStamp()}.html`);
+            mkdirSync(outDir, { recursive: true });
+            writeFileSync(outPath, html, "utf-8");
+            opened = openInBrowser(outPath);
+          } catch (e) {
+            return `✓ getbot 调试模式已开启（HTML 渲染失败：${e.message}）\n日志文件夹：${logDir()}`;
+          }
+
+          return opened
+            ? `✓ getbot 调试模式已开启 —— 诊断报告已在浏览器打开：${outPath}`
+            : `✓ getbot 调试模式已开启\n诊断报告 HTML：${outPath}（自动打开浏览器失败，请手动打开）`;
         },
       }),
     },
   };
 };
 
-// ========== TUI Plugin：命令面板 + 快捷键 ==========
+// ========== TUI Plugin：命令面板 ==========
 
 const CATEGORY_LABELS = {
   image: "文生图",
@@ -1638,10 +1682,10 @@ export const tui = async (api) => {
     ui.toast({ variant: "warning", title: "getbot", message: `缺分类模型：${missingCats.join(", ")}。对 AI 说"开 getbot 调试"查看修复指引` });
   }
 
-  // 启动时静默查 ffmpeg：缺了不致命但语音相关全废，提示用户开 debug 跑诊断
+  // 启动时静默查 ffmpeg：缺了不致命但 ASR 命令全废（splitAudio/probeDurationSec 都靠 ffmpeg）
   try {
     if (!checkBinary("ffmpeg").ok) {
-      ui.toast({ variant: "info", title: "getbot", message: "未检测到 ffmpeg —— 语音功能将受限。对 AI 说\"开 getbot 调试\"获取自动安装指引" });
+      ui.toast({ variant: "info", title: "getbot", message: "未检测到 ffmpeg —— /getbot-asr 将受限。对 AI 说\"开 getbot 调试\"获取自动安装指引" });
     }
   } catch {}
 
@@ -1653,72 +1697,6 @@ export const tui = async (api) => {
       try { saveCache(projectDir, cache); } catch {}
     }
     ui.toast({ variant: "success", title: "getbot", message: `${CATEGORY_LABELS[cat]} 已切换到: ${modelId}` });
-  };
-
-  // 语音输入
-  let recording = false;
-  const voiceInput = async () => {
-    if (recording) {
-      ui.toast({ variant: "info", title: "getbot 语音", message: "正在录音中" });
-      return;
-    }
-    if (!apiKey) {
-      ui.toast({ variant: "error", title: "getbot 语音", message: "未配置 GETBOT_API_KEY" });
-      return;
-    }
-    const asrModel = kv.get("getbot.model.asr", null) || resolveDefault(cache, "asr", null, config);
-    if (!asrModel) {
-      ui.toast({ variant: "error", title: "getbot 语音", message: "未找到 ASR 模型" });
-      return;
-    }
-
-    const duration = config?.voice_input?.duration_sec || 30;
-    const language = config?.voice_input?.language || "zh";
-    const tmpDir = join(projectDir, ".opencode", "tmp", "getbot_voice");
-    const wav = join(tmpDir, `rec_${Date.now()}.wav`);
-
-    const ctx = newLogContext(projectDir, "tui_voice_input", { duration, language }, config);
-    ctx.resolved = { asrModel, wav };
-
-    // 锁必须在 try 内获取，确保 finally 一定能 reset；mkdirSync/toast 也包进 try 防止异常导致锁残留
-    recording = true;
-    try {
-      mkdirSync(tmpDir, { recursive: true });
-      ui.toast({ variant: "info", title: "getbot 语音", message: `开始录音 ${duration} 秒...` });
-      await recordAudio(wav, duration);
-      try { ctx.resolved.recordedBytes = statSync(wav).size; } catch {}
-      const text = await callTranscription(apiKey, config, { model: asrModel, audioPath: wav, language }, ctx);
-      const trimmed = (text || "").trim();
-      ctx.outputs = [{ transcript: trimmed, length: trimmed.length }];
-      if (!trimmed) {
-        ctx.error = "未识别到内容";
-        ui.toast({ variant: "warning", title: "getbot 语音", message: "未识别到内容" });
-        return;
-      }
-      try {
-        await copyToClipboard(trimmed);
-        const preview = trimmed.length > 40 ? trimmed.slice(0, 40) + "..." : trimmed;
-        ui.toast({ variant: "success", title: "getbot 语音", message: `已复制到剪贴板，按 Ctrl+V 粘贴：${preview}` });
-        ctx.ok = true;
-      } catch (e) {
-        ctx.error = `clipboard: ${e.message}`;
-        ui.toast({ variant: "warning", title: "getbot 语音", message: `识别完成但剪贴板失败：${trimmed.slice(0, 50)}` });
-      }
-    } catch (e) {
-      ctx.error = e.message;
-      if (/ffmpeg/i.test(e.message)) {
-        const hint = process.platform === "win32"
-          ? "winget install Gyan.FFmpeg"
-          : process.platform === "darwin" ? "brew install ffmpeg" : "apt install ffmpeg";
-        ui.toast({ variant: "error", title: "getbot 语音", message: `ffmpeg 失败：${hint}` });
-      } else {
-        ui.toast({ variant: "error", title: "getbot 语音", message: e.message });
-      }
-    } finally {
-      recording = false;
-      try { rmSync(wav); } catch {}
-      finishLog(ctx);
-    }
   };
 
   // 刷新模型列表（重新读缓存；实际拉取请重跑 install.mjs）
@@ -1754,15 +1732,6 @@ export const tui = async (api) => {
           message: ok ? `已打开 ${logDir()}` : `打开失败，请手动访问 ${logDir()}`,
         });
       },
-    });
-
-    cmds.push({
-      title: "语音输入（getbot ASR）",
-      value: "getbot:voice",
-      description: `录音 ${config?.voice_input?.duration_sec || 30} 秒 → 转文字 → 复制到剪贴板`,
-      category: "getbot",
-      keybind: config?.voice_input?.keybind || "ctrl+shift+v",
-      onSelect: () => { voiceInput(); },
     });
 
     for (const cat of CATS) {

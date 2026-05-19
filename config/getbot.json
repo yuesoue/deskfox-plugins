@@ -7,16 +7,12 @@
     "tts_voice": "Cherry",
     "tts_format": "wav"
   },
-  "voice_input": {
-    "duration_sec": 30,
-    "language": "zh",
-    "keybind": "ctrl+shift+v"
-  },
   "output_dirs": {
     "image": "getbot.me/image",
     "audio": "getbot.me/audio",
     "html": "getbot.me/html",
-    "md": "getbot.me/md"
+    "md": "getbot.me/md",
+    "translate": "getbot.me/translate"
   },
   "category_overrides": {
     "image": [],
