@@ -1,5 +1,6 @@
 {
   "baseURL": "https://api.getbot.me/v1",
+  "debug": false,
   "defaults": {
     "image_size": "1024x1024",
     "image_n": 1,

@@ -4,8 +4,9 @@
  *
  * 默认安装到 OpenCode 全局目录：~/.config/opencode/
  *   - plugins/getbot/{getbot.js, marked.mjs, package.json}   ← 子目录形态（opencode 加载要求）
- *   - command/getbot-{image,tts,asr,translate,md2html,doctor,logs}.md
- *   - config/getbot.json
+ *   - command/getbot-{image,tts,asr,translate,md2html,help}.md   ← 6 个面向用户的 slash 命令
+ *   - config/getbot.json   ← 含 debug 开关，默认关闭，对 AI 说"开 getbot 调试"打开
+ *   - （注：getbot-doctor / getbot-logs / getbot-debug 工具仅 LLM 可调，无 slash 入口）
  *   - config/getbot-secret.json（apiKey + baseURL，独立保存，不写主配置）
  *   - cache/getbot-models.json
  *
@@ -50,7 +51,7 @@ const PLUGIN_PACKAGE_JSON = {
   version: "0.0.0-local",
   private: true,
   type: "module",
-  description: "getbot.me × OpenCode 多模态插件（image/tts/asr/translate/md2html + logs + doctor）",
+  description: "getbot.me × OpenCode 多模态插件（image/tts/asr/translate/md2html + debug/logs/doctor）",
   main: "./getbot.js",
   exports: {
     "./server": "./getbot.js",
@@ -302,13 +303,61 @@ function classify(ids) {
 }
 
 // ========== ffmpeg 检测 ==========
-function checkFfmpeg() {
+// 通用二进制存在性检查（PATH + Windows 固定路径）
+function whichBinary(name) {
   const cmd = platform() === "win32" ? "where" : "which";
-  const r = spawnSync(cmd, ["ffmpeg"], { encoding: "utf-8" });
+  const r = spawnSync(cmd, [name], { encoding: "utf-8" });
   if (r.status === 0 && r.stdout.trim()) return true;
-  const p = platform() === "win32" ? "C:\\ffmpeg\\bin\\ffmpeg.exe" : null;
-  if (p && existsSync(p)) return true;
+  if (platform() === "win32") {
+    const fixed = `C:\\ffmpeg\\bin\\${name}.exe`;
+    if (existsSync(fixed)) return true;
+  }
   return false;
+}
+
+// 安装末尾跑：检查 getbot 插件运行时依赖的二进制（ffmpeg/ffprobe/xclip），
+// 缺什么列什么 + 生成可拷给 AI 助理的安装提示词。其他诊断项（API Key/cache/写权限）
+// install.mjs 自身流程已经覆盖（fetchModels 验 key、writeCache 验写权限），不在这里重复。
+function checkInstallDeps() {
+  const missing = [];
+  if (!whichBinary("ffmpeg")) missing.push("ffmpeg");
+  else if (!whichBinary("ffprobe")) missing.push("ffprobe");  // 罕见，ffmpeg 装了但 ffprobe 没装
+  if (platform() === "linux" && !whichBinary("xclip")) missing.push("xclip");
+  return missing;
+}
+
+function formatDepsInstallPrompt(missingPkgs) {
+  // 与 plugins/getbot.js 里 formatDoctorReport 的 AI 代办段保持口径一致
+  const platName = platform() === "win32" ? "Windows" : platform() === "darwin" ? "macOS" : "Linux";
+  const pkgManagerHint = platName === "Windows"
+    ? "winget / chocolatey / scoop"
+    : platName === "macOS" ? "Homebrew" : "apt / dnf / pacman";
+  // 去重（ffmpeg/ffprobe 都靠 ffmpeg 包提供）
+  const pkgs = [...new Set(missingPkgs.map((p) => p === "ffprobe" ? "ffmpeg" : p))];
+  const lines = [];
+  lines.push("");
+  lines.push("📋 ============ 复制下面这段给你的 AI 助理 ============");
+  lines.push("");
+  lines.push("我刚装好 OpenCode 的 getbot 多模态插件，环境检测发现缺少以下依赖：");
+  for (const p of pkgs) lines.push(`- ${p}`);
+  lines.push("");
+  lines.push(`我的系统：${platName}（Node ${process.version}）`);
+  lines.push("");
+  lines.push("请你帮我自动完成以下事情，**不要再询问我细节，直接开始**：");
+  lines.push("");
+  lines.push(`1. 检测我系统上可用的包管理器（${pkgManagerHint}）`);
+  lines.push(`2. 用首选的包管理器一次性安装：${pkgs.join(" / ")}`);
+  if (pkgs.includes("ffmpeg") && platName === "Windows") {
+    lines.push(`3. 注意：getbot 插件会自动把 C:\\ffmpeg\\bin\\ 加到 PATH 前面。如果包管理器装到了别处（比如 winget 默认路径），请额外把 ffmpeg.exe 和 ffprobe.exe 复制一份到 C:\\ffmpeg\\bin\\，或确认其安装位置已在系统 PATH 中。`);
+    lines.push(`4. 全部包管理器都失败时：从 https://www.gyan.dev/ffmpeg/builds/ 下载 release-essentials.zip，解压后把 bin\\ 目录里的全部 .exe 放到 C:\\ffmpeg\\bin\\`);
+  }
+  const verifyStep = (pkgs.includes("ffmpeg") && platName === "Windows") ? 5 : 3;
+  lines.push(`${verifyStep}. 安装完成后逐项验证：`);
+  for (const p of pkgs) lines.push(`   - ${p} -version`);
+  lines.push(`${verifyStep + 1}. 把每项验证的版本号告诉我，然后告诉我"可以继续使用 getbot 插件了"`);
+  lines.push("");
+  lines.push("=========================================================");
+  return lines.join("\n");
 }
 
 // ========== 文件复制 ==========
@@ -630,8 +679,8 @@ async function main() {
   const toolDefaults = writeCache(buckets, raw);
   log("✓ 模型分类缓存已写入 " + join(GLOBAL_DIR, "cache", "getbot-models.json"));
 
-  // 7. ffmpeg
-  const hasFfmpeg = checkFfmpeg();
+  // 7. 检查运行时二进制依赖（ffmpeg/ffprobe/xclip）
+  const missingDeps = checkInstallDeps();
 
   // 8. 总结
   log("");
@@ -639,27 +688,31 @@ async function main() {
   log("  ✅ 安装完成");
   log("==============================================================");
   log("");
-  log("已注册 8 个斜杠命令（在 OpenCode 聊天窗输入 / 查看）：");
+  log("已注册 6 个斜杠命令（在 OpenCode 聊天窗输入 / 查看）：");
   log(`  /getbot-image     文生图    默认模型 → ${toolDefaults.image || "（无可用模型）"}`);
   log(`  /getbot-tts       语音合成  默认模型 → ${toolDefaults.tts || "（无可用模型）"}`);
   log(`  /getbot-asr       语音识别  默认模型 → ${toolDefaults.asr || "（无可用模型）"}`);
   log(`  /getbot-translate 中英互译  默认模型 → ${toolDefaults.translate || "（无可用模型）"}`);
   log(`  /getbot-md2html   MD 转打印排版 HTML（在浏览器里 Ctrl+P 另存 PDF）`);
   log(`  /getbot-help      使用说明（命令清单 / TTS 音色 / 默认模型 / 排查入口）`);
-  log(`  /getbot-doctor    环境诊断  缺依赖时给出可拷贝给 AI 助理的自动安装提示词`);
-  log(`  /getbot-logs      打开调用日志文件夹（排查时把今天的日志发给开发者）`);
   log("快捷键：Ctrl+Shift+V → 录音 30s → 自动转文字插入输入框");
+  log("排查：遇到问题时对 AI 说\"开 getbot 调试\"，会打开 debug 日志 + 跑环境诊断");
   log("");
 
-  if (!hasFfmpeg) {
-    log("⚠  未检测到 ffmpeg，语音功能将受限。重启 opencode 后跑 /getbot-doctor 看自动安装指引。");
+  if (missingDeps.length) {
+    log(`⚠  检测到缺少 ${missingDeps.length} 个运行时依赖：${missingDeps.join(", ")}`);
+    log("   插件本体已装好，但语音相关功能（ASR / 录音输入）将受限。");
+    log(formatDepsInstallPrompt(missingDeps));
+    log("");
+  } else {
+    log("✓ 运行时依赖（ffmpeg / ffprobe" + (platform() === "linux" ? " / xclip" : "") + "）齐全");
     log("");
   }
 
   log("📋 下一步：");
   log("  1) 完全退出 OpenCode 桌面 app（包括系统托盘图标）");
   log("  2) 重开 app");
-  log("  3) 输 /getbot-help 看完整说明，/getbot-doctor 确认环境，再试 /getbot-image 一只橘猫");
+  log("  3) 输 /getbot-help 看完整说明，再试 /getbot-image 一只橘猫");
   log("");
   log("说明：插件已登记到 opencode.jsonc 的 plugin 数组。");
   log("      插件模型不出现在 OpenCode 主聊天的模型列表里，只通过 /getbot-* 斜杠命令调用。");

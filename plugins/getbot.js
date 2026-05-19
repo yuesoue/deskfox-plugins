@@ -7,7 +7,7 @@
  *   - tui：命令面板条目（切换各模态默认模型、刷新模型列表） + Ctrl+Shift+V 语音输入
  *
  * 使用前请先运行：node install.mjs [sk-xxxx]
- * 安装后可用 /getbot-doctor 检查环境依赖是否就绪
+ * 安装期会自动检查 ffmpeg 等运行时依赖；遇到问题时对 AI 说"开 getbot 调试"即可记日志 + 跑诊断。
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, statSync, appendFileSync } from "node:fs";
@@ -120,14 +120,14 @@ function baseURL(config) {
 
 async function requireKey(projectDir) {
   const key = loadApiKey(projectDir);
-  if (!key) throw new Error("未找到 GETBOT_API_KEY：请运行 install.mjs，或运行 /getbot-doctor 查看完整诊断");
+  if (!key) throw new Error("未找到 GETBOT_API_KEY：请运行 install.mjs；如需详细诊断，对 AI 说'开 getbot 调试'");
   return key;
 }
 
 // ========== 短时去重（防 LLM agentic loop 重复调用）==========
 // 仅对"确定性输出"工具启用：同 (projectDir + 工具名 + args) 在 DEDUP_TTL_MS 内复现 → 直接返回上次结果，
 // 不实际打 API、不写新文件。LLM 看到的返回串与上次完全一致，对其不可见；ctx.resolved.dedupHit 在日志里留痕。
-// 不启用的工具：getbot_image（生成带随机性）、getbot_asr/md2html（输入可能变）、getbot_doctor/logs（诊断需实时）
+// 不启用的工具：getbot_image（生成带随机性）、getbot_asr/md2html（输入可能变）、getbot_doctor/logs/debug/help（诊断/控制需实时）
 const DEDUP_TTL_MS = 60000;
 const DEDUP_MAX_ENTRIES = 50;
 const recentCalls = new Map(); // key → { ts, result, outputs }
@@ -242,6 +242,11 @@ function appendLog(entry) {
 }
 
 function newLogContext(projectDir, toolName, args, config) {
+  // Debug 关时返回轻量 stub：所有 ctx.xxx = 赋值仍正常工作（不需要改每处调用点），
+  // 但 finishLog 看到 _disabled 直接返回，零 IO、零持久状态。
+  if (!config?.debug) {
+    return { _disabled: true, resolved: {}, api: [], outputs: [], ok: false, error: null };
+  }
   const cache = loadCache(projectDir);
   let host = null;
   try { host = hostname(); } catch {}
@@ -273,7 +278,7 @@ function newLogContext(projectDir, toolName, args, config) {
 }
 
 function finishLog(ctx) {
-  if (!ctx) return;
+  if (!ctx || ctx._disabled) return;
   const entry = {
     ts: ctx.ts,
     tool: ctx.tool,
@@ -1108,7 +1113,7 @@ export const GetbotPlugin = async ({ directory }) => {
             const model = args.model || resolveDefault(cache, "image", null, config);
             if (!model) {
               ctx.error = "未配置文生图模型";
-              return "错误：未配置文生图模型。请先运行 install.mjs（如已运行过 /getbot-doctor 获取详细诊断）";
+              return "错误：未配置文生图模型。请先运行 install.mjs（详细诊断请对 AI 说'开 getbot 调试'）";
             }
             const outDir = resolveOutputDir(projectDir, config, "image", "getbot.me/image");
             ctx.resolved = {
@@ -1169,7 +1174,7 @@ export const GetbotPlugin = async ({ directory }) => {
             const model = args.model || resolveDefault(cache, "tts", null, config);
             if (!model) {
               ctx.error = "未配置 TTS 模型";
-              return "错误：未配置 TTS 模型。请先运行 install.mjs（如已运行过 /getbot-doctor 获取详细诊断）";
+              return "错误：未配置 TTS 模型。请先运行 install.mjs（详细诊断请对 AI 说'开 getbot 调试'）";
             }
             const outDir = resolveOutputDir(projectDir, config, "audio", "getbot.me/audio");
             ctx.resolved = {
@@ -1225,7 +1230,7 @@ export const GetbotPlugin = async ({ directory }) => {
             const model = args.model || resolveDefault(cache, "asr", null, config);
             if (!model) {
               ctx.error = "未配置 ASR 模型";
-              return "错误：未配置 ASR 模型。请先运行 install.mjs（如已运行过 /getbot-doctor 获取详细诊断）";
+              return "错误：未配置 ASR 模型。请先运行 install.mjs（详细诊断请对 AI 说'开 getbot 调试'）";
             }
             if (!existsSync(args.filePath)) {
               ctx.error = `文件不存在: ${args.filePath}`;
@@ -1429,7 +1434,7 @@ export const GetbotPlugin = async ({ directory }) => {
       }),
 
       getbot_doctor: tool({
-        description: "诊断 getbot 插件运行环境。检查 Node、API Key、模型缓存、ffmpeg/ffprobe、xclip（Linux）、写权限等依赖，对每个缺失项给出修复办法；同时把'AI 助理可代办的依赖安装'整合成一段拷贝即用的提示词。用户通过 /getbot-doctor 触发。",
+        description: "诊断 getbot 插件运行环境。检查 Node、API Key、模型缓存、ffmpeg/ffprobe、xclip（Linux）、写权限等依赖，对每个缺失项给出修复办法；同时把'AI 助理可代办的依赖安装'整合成一段拷贝即用的提示词。用户表达'跑下 getbot 诊断 / 看下环境 / 排查 getbot'时调用。",
         args: {},
         async execute() {
           const config = loadConfig(projectDir);
@@ -1456,7 +1461,7 @@ export const GetbotPlugin = async ({ directory }) => {
       }),
 
       getbot_help: tool({
-        description: "返回 getbot 插件的完整使用说明 —— 包括所有 slash 命令、TTS 可用音色、当前默认模型、快捷键、排查入口。严格只调用 1 次。用户通过 /getbot-help 触发。",
+        description: "返回 getbot 插件的完整使用说明 —— 包括所有 slash 命令、TTS 可用音色、当前默认模型、快捷键、排查入口。严格只调用 1 次。用户通过 /getbot-help 触发。仅在用户主动询问帮助时调用，不要在其他工具调用前自动调用。",
         args: {},
         async execute() {
           const config = loadConfig(projectDir);
@@ -1467,18 +1472,17 @@ export const GetbotPlugin = async ({ directory }) => {
             const defaultVoice = config?.defaults?.tts_voice || "Cherry";
             const ttsModel = resolveDefault(cache, "tts", null, config) || "（无可用模型）";
 
+            const debugOn = !!config?.debug;
             const lines = [
               "================ getbot 插件使用说明 ================",
               "",
-              "可用 slash 命令（8 条）：",
+              "可用 slash 命令（6 条）：",
               "  /getbot-image     <描述>       文生图",
               "  /getbot-tts       <文本>       文字转语音（WAV）",
               "  /getbot-asr       <音频路径>   语音转文字",
               "  /getbot-translate <文本>       中英互译（按原文自动判断方向）",
               "  /getbot-md2html   <md 路径>    Markdown 转打印 HTML，浏览器里 Ctrl+P 另存 PDF",
               "  /getbot-help                    本帮助",
-              "  /getbot-doctor                  环境诊断（缺依赖时给可拷贝给 AI 助理的安装提示）",
-              "  /getbot-logs                    打开调用日志文件夹",
               "",
               `TTS 可用音色（model=${ttsModel}）：`,
               ...TTS_VOICES.map((v) => `  - ${v}${v === defaultVoice ? "  ← 默认" : ""}`),
@@ -1496,9 +1500,12 @@ export const GetbotPlugin = async ({ directory }) => {
               "快捷键：",
               `  Ctrl+Shift+V  录音 ${config?.voice_input?.duration_sec || 30} 秒 → 转文字 → 复制到剪贴板`,
               "",
-              "排查问题：",
-              "  /getbot-doctor   检查 Node / API Key / 模型缓存 / ffmpeg / ffprobe / 写权限",
-              "  /getbot-logs     打开日志文件夹（每天一个 JSONL，便于发给开发者排查）",
+              "排查问题（默认不写日志，按需开启）：",
+              `  当前 debug 状态：${debugOn ? "✓ 已开启（工具调用会写 JSONL 日志）" : "✗ 已关闭"}`,
+              "  ① 对 AI 说\"开 getbot 调试\"   → 打开 debug + 跑一次环境诊断",
+              "  ② 复现你遇到的问题",
+              "  ③ 对 AI 说\"打开 getbot 日志文件夹\"   → 把今日 JSONL 发给开发者",
+              "  ④ 排查完毕对 AI 说\"关闭 getbot 调试\"   → 避免日志膨胀",
             ];
             ctx.resolved = { defaultsKeys: Object.keys(defaults), voiceCount: TTS_VOICES.length };
             ctx.ok = true;
@@ -1513,7 +1520,7 @@ export const GetbotPlugin = async ({ directory }) => {
       }),
 
       getbot_logs: tool({
-        description: "返回 getbot 插件调用日志所在路径，并可选自动用系统文件管理器打开日志文件夹。排查问题时把日志发给开发者即可。用户通过 /getbot-logs 触发。",
+        description: "返回 getbot 插件调用日志所在路径，并可选自动用系统文件管理器打开日志文件夹。排查问题时把日志发给开发者即可。用户表达'打开 getbot 日志 / 看 getbot 日志在哪 / 把日志发给开发者'时调用。注意：日志仅在 debug 开启时才会被写入，工具本身不开关 debug。",
         args: {
           open: tool.schema.boolean().optional().describe("是否自动用系统文件管理器打开日志文件夹"),
         },
@@ -1523,21 +1530,71 @@ export const GetbotPlugin = async ({ directory }) => {
           try { mkdirSync(dir, { recursive: true }); } catch {}
           const todayExists = existsSync(today);
           const todaySize = todayExists ? statSync(today).size : 0;
+          const debugOn = !!loadConfig(projectDir)?.debug;
           let opened = null;
           if (args.open) opened = openInBrowser(dir);
 
           const lines = [
             "getbot 调用日志（每天一个文件，每行一次工具调用）",
             "",
+            `Debug 状态：${debugOn ? "✓ 开启（新调用会写日志）" : "✗ 关闭（不写新日志，已生成的文件仍保留）"}`,
             `日志文件夹：${dir}`,
-            `今日日志：${today}` + (todayExists ? `（${(todaySize / 1024).toFixed(1)}KB）` : "（暂无，调用一次工具后自动生成）"),
+            `今日日志：${today}` + (todayExists ? `（${(todaySize / 1024).toFixed(1)}KB）` : "（暂无，待 debug 开启且调用过工具后才生成）"),
           ];
           if (args.open) {
             lines.push("");
             lines.push(opened ? "已尝试用系统文件管理器打开日志文件夹。" : "自动打开失败，请手动复制上面的路径打开。");
           }
+          if (!debugOn) {
+            lines.push("");
+            lines.push("提示：当前 debug 关闭，需要新日志请先对 AI 说\"开 getbot 调试\"。");
+          }
           lines.push("");
           lines.push("排查时把今日日志文件发给开发者，单行 JSON 即可定位 args/请求体/响应头/输出 hash 等关键证据。");
+          return lines.join("\n");
+        },
+      }),
+
+      getbot_debug: tool({
+        description: "打开/关闭 getbot 插件的调试模式（debug）。开启后所有工具调用都会写 JSONL 日志到 ~/.config/opencode/cache/logs/，并立即跑一次环境诊断；关闭后停止写新日志（已有文件保留）。用户表达'开/关 getbot 调试 / 排查 getbot / getbot 出问题了'时调用。修改 ~/.config/opencode/config/getbot.json 的 debug 字段，立即生效，不需要重启。",
+        args: {
+          enable: tool.schema.boolean().describe("true 打开 debug 模式并跑一次诊断；false 关闭"),
+        },
+        async execute(args) {
+          const newDebug = !!args.enable;
+          const cfgPath = join(GLOBAL_OC_DIR, "config", "getbot.json");
+          let raw = {};
+          try { raw = JSON.parse(readFileSync(cfgPath, "utf-8")); } catch {}
+          raw.debug = newDebug;
+          try { mkdirSync(dirname(cfgPath), { recursive: true }); } catch {}
+          writeFileSync(cfgPath, JSON.stringify(raw, null, 2) + "\n", "utf-8");
+
+          const lines = [];
+          if (newDebug) {
+            lines.push("✓ getbot 调试模式已**开启**");
+            lines.push("");
+            lines.push(`配置文件：${cfgPath}`);
+            lines.push(`日志文件夹：${logDir()}`);
+            lines.push(`今日日志：${logFilePath()}`);
+            lines.push("");
+            lines.push("接下来：");
+            lines.push("  ① 复现你遇到的问题（再试一次出错的命令）");
+            lines.push("  ② 把今日日志文件发给开发者（对 AI 说\"打开 getbot 日志文件夹\"）");
+            lines.push("  ③ 排查完成后请对 AI 说\"关闭 getbot 调试\"，避免日志膨胀");
+            lines.push("");
+            lines.push("============ 顺便：当前环境诊断 ============");
+            lines.push("");
+            try {
+              const report = runDoctor(projectDir, { ...raw });
+              lines.push(formatDoctorReport(report));
+            } catch (e) {
+              lines.push(`（诊断失败，但 debug 开关已生效）：${e.message}`);
+            }
+          } else {
+            lines.push("✓ getbot 调试模式已**关闭**");
+            lines.push("");
+            lines.push(`后续工具调用不再写日志。已生成的日志文件保留在：${logDir()}`);
+          }
           return lines.join("\n");
         },
       }),
@@ -1573,18 +1630,18 @@ export const tui = async (api) => {
 
   const apiKey = loadApiKey(projectDir);
   if (!apiKey) {
-    ui.toast({ variant: "warning", title: "getbot", message: "未配置 GETBOT_API_KEY。运行 /getbot-doctor 查看完整修复指引" });
+    ui.toast({ variant: "warning", title: "getbot", message: "未配置 GETBOT_API_KEY。对 AI 说\"开 getbot 调试\"看完整修复指引" });
   }
 
   const missingCats = CATS.filter((c) => !resolveDefault(cache, c, null, config) && !kv.get(`getbot.model.${c}`));
   if (missingCats.length && cache) {
-    ui.toast({ variant: "warning", title: "getbot", message: `缺分类模型：${missingCats.join(", ")}。运行 /getbot-doctor 查看修复指引` });
+    ui.toast({ variant: "warning", title: "getbot", message: `缺分类模型：${missingCats.join(", ")}。对 AI 说"开 getbot 调试"查看修复指引` });
   }
 
-  // 启动时静默查 ffmpeg：缺了不致命但语音相关全废，提示用户跑 /getbot-doctor
+  // 启动时静默查 ffmpeg：缺了不致命但语音相关全废，提示用户开 debug 跑诊断
   try {
     if (!checkBinary("ffmpeg").ok) {
-      ui.toast({ variant: "info", title: "getbot", message: "未检测到 ffmpeg —— 语音功能将受限。/getbot-doctor 获取自动安装指引" });
+      ui.toast({ variant: "info", title: "getbot", message: "未检测到 ffmpeg —— 语音功能将受限。对 AI 说\"开 getbot 调试\"获取自动安装指引" });
     }
   } catch {}
 
