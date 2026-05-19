@@ -46,6 +46,22 @@ export function walk(dir, base = dir) {
 const DOS_TIME = 0;
 const DOS_DATE = (1 << 5) | 1; // year offset from 1980 = 0, month=1, day=1
 
+// "version made by" 高字节 = 主机系统（3 = Unix），低字节 = ZIP 规范版本（20 = 2.0）
+// 设成 Unix 是为了让 macOS / Linux 解压器去读 central dir 的 external attrs 高 16 位作为 Unix 权限位
+const VERSION_MADE_BY = (3 << 8) | 20;
+
+// 哪些文件需要 +x 权限（macOS 双击 .command 必须有 0755，否则会 "permission denied"）
+function isExecutable(relPath) {
+  return /\.(command|sh)$/i.test(relPath);
+}
+
+// 把 Unix 文件模式（如 0o100755）打包成 ZIP central dir 的 external attrs 字段
+// 高 16 位 = unix mode；低 16 位 = DOS attrs（0 = 普通文件）
+function externalAttrsFor(relPath) {
+  const unixMode = isExecutable(relPath) ? 0o100755 : 0o100644;
+  return (unixMode << 16) >>> 0;
+}
+
 export function packZip(entries, outPath) {
   const localHeaders = [];
   const centralDir = [];
@@ -59,6 +75,7 @@ export function packZip(entries, outPath) {
     const useDeflate = deflated.length < data.length;
     const compData = useDeflate ? deflated : data;
     const compMethod = useDeflate ? 8 : 0;
+    const extAttrs = externalAttrsFor(e.rel);
 
     const lh = Buffer.alloc(30);
     lh.writeUInt32LE(0x04034b50, 0);
@@ -77,7 +94,7 @@ export function packZip(entries, outPath) {
 
     const cd = Buffer.alloc(46);
     cd.writeUInt32LE(0x02014b50, 0);
-    cd.writeUInt16LE(20, 4);        // version made by
+    cd.writeUInt16LE(VERSION_MADE_BY, 4);  // Unix + 2.0：让解压器识别 external attrs 是 Unix mode
     cd.writeUInt16LE(20, 6);        // version needed
     cd.writeUInt16LE(0x0800, 8);    // flag UTF-8
     cd.writeUInt16LE(compMethod, 10);
@@ -91,7 +108,7 @@ export function packZip(entries, outPath) {
     cd.writeUInt16LE(0, 32);        // comment length
     cd.writeUInt16LE(0, 34);        // disk number
     cd.writeUInt16LE(0, 36);        // internal attrs
-    cd.writeUInt32LE(0, 38);        // external attrs
+    cd.writeUInt32LE(extAttrs, 38); // external attrs：Unix mode 在高 16 位
     cd.writeUInt32LE(offset, 42);   // local header offset
 
     centralDir.push(Buffer.concat([cd, nameBuf]));
