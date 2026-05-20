@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
- * 把 getbot-opencode-provider/ 自身打成 dist/getbot-opencode-provider.zip
+ * 把 getbot-opencode-provider/ 自身打成 ../压缩包/getbot-opencode-provider.zip
  *
  * provider 版 —— 与普通版 getbot-opencode/pack.mjs 的唯一差别是 zip 文件名，
  * 便于用户下载时区分。打包时仍排除 pack.mjs / dist / _docs / _smoke。
  *
- * 用法：node getbot-opencode-provider/pack.mjs（从仓库根跑）
+ * 用法：node getbot-opencode-provider/pack.mjs（从 deskfox-plugins 仓库根跑）
+ *
+ * 输出位置：deskfox-plugins/压缩包/getbot-opencode-provider.zip
  */
 
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync } from "node:fs";
@@ -14,8 +16,8 @@ import { fileURLToPath } from "node:url";
 import { deflateRawSync, crc32 } from "node:zlib";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SRC_DIR = __dirname;                                       // 插件目录本身
-const OUT = resolve(__dirname, "dist", "getbot-opencode-provider.zip");   // 打包产物
+const SRC_DIR = __dirname;                                                          // 插件目录本身
+const OUT = resolve(__dirname, "..", "压缩包", "getbot-opencode-provider.zip");     // 打包产物
 const SELF_NAME = "pack.mjs";
 
 // 不打进 zip 的顶层子项：
