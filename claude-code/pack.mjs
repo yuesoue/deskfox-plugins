@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 /**
- * 把 getbot-opencode-provider/ 自身打成 ../release/getbot-opencode-provider.zip
+ * 把 claude-code/ 自身打成 ../release/claude-code.zip
  *
- * provider 版 —— 与普通版 getbot-opencode/pack.mjs 的唯一差别是 zip 文件名，
- * 便于用户下载时区分。打包时仍排除 pack.mjs / dist / _docs / _smoke。
+ * 为什么不用 PowerShell Compress-Archive：它不设 UTF-8 filename flag（0x0800），
+ * 导致中文文件名在 macOS/Linux 上解压出现 mojibake。这里手写 ZIP 结构并显式
+ * 置位 UTF-8 flag，跨平台解压都能拿到正确文件名。
  *
- * 用法：node getbot-opencode-provider/pack.mjs（从 deskfox-plugins 仓库根跑）
+ * 用法：node claude-code/pack.mjs（从 deskfox-plugins 仓库根跑）
  *
- * 输出位置：deskfox-plugins/release/getbot-opencode-provider.zip
+ * 输出位置：deskfox-plugins/release/claude-code.zip
+ * （与 getbot-opencode 等其他插件的 zip 共用同一个 release/ 发行目录）
+ *
+ * 前置条件：dist/ 必须最新（先在 claude-code/ 里跑 `bun run build`）
  */
 
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync } from "node:fs";
@@ -16,18 +20,41 @@ import { fileURLToPath } from "node:url";
 import { deflateRawSync, crc32 } from "node:zlib";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SRC_DIR = __dirname;                                                          // 插件目录本身
-const OUT = resolve(__dirname, "..", "release", "getbot-opencode-provider.zip");     // 打包产物
+const SRC_DIR = __dirname;                                             // 插件目录本身
+const OUT = resolve(__dirname, "..", "release", "claude-code.zip");    // 打包产物（仓库根 /release/）
 const SELF_NAME = "pack.mjs";
 
-// 不打进 zip 的顶层子项：
-//   pack.mjs   —— 打包脚本自身，最终用户不需要
-//   dist       —— 上次打的 zip，不能套娃
-//   _docs      —— 开发文档，发行包不需要
-//   _smoke     —— 本地烟测脚本（也被 .gitignore 排除）
-const EXCLUDE_TOP = new Set([SELF_NAME, "dist", "_docs", "_smoke"]);
+// 不打进 zip 的顶层子项 —— 用户安装时只需要 install.* + dist/ + README + package.json，
+// 开发文件、源码、依赖、CI 配置全排除。
+const EXCLUDE_TOP = new Set([
+  SELF_NAME,                       // 打包脚本自身
+  "node_modules",                  // 依赖：用户不需要（dist 已 bundle）
+  "src",                           // TS 源码：用户用编译产物 dist/
+  "test.ts",                       // 单测
+  "tsconfig.json",                 // TS 配置
+  "tsup.config.ts",                // 打包配置
+  "bun.lock",                      // 锁文件
+  "debug.log",                     // 本地调试日志
+  "10097.patch",                   // 上游 PR 补丁，开发参考
+  "HANDOFF-deskfox-fork.md",       // 开发交接文档
+  "HANDOFF-deskfox-fork-2-cwd.md", // 开发交接文档
+  "NOTES.md",                      // 开发笔记
+  "jsr.json",                      // JSR 发布元数据，本地分发不需要
+  "mod.ts",                        // JSR 入口源文件，对应也不需要
+  ".github",                       // CI 工作流
+  ".gitignore",                    // git 元数据
+  ".git",                          // 不应在源目录，保险
+  ".claude",                       // Claude Code 运行时数据（scheduled_tasks.lock 等）
+]);
 
 if (!existsSync(SRC_DIR)) { console.error("源目录不存在: " + SRC_DIR); process.exit(1); }
+
+// 提示用户：dist/ 必须存在，否则装上后 install.* 会报"找不到 plugin build 产物"
+const distPath = join(SRC_DIR, "dist", "index.js");
+if (!existsSync(distPath)) {
+  console.error("✗ dist/index.js 不存在，请先在 claude-code/ 里跑: bun install && bun run build");
+  process.exit(1);
+}
 
 export function walk(dir, base = dir) {
   const entries = [];
