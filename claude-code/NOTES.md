@@ -43,7 +43,7 @@ archived → 上游不会再有 commit。所有维护我们自己来。
 
 ### 3.4 `src/logger.ts`
 
-- **回 DEBUG 环境变量控制(默认关)** — 普通用户机器不再产生 debug.log。需要诊断时设系统变量 `DEBUG=opencode-claude-code` 重启 DeskFox,日志写到 `D:/project/deskfox-plugins/claude-code/debug.log`。自定义路径用 `OPENCODE_CLAUDE_CODE_LOG_FILE`
+- **回 DEBUG 环境变量控制(默认关)** — 普通用户机器不再产生 debug.log。需要诊断时设系统变量 `DEBUG=opencode-claude-code` 重启 DeskFox,日志写到 `~/.config/opencode/claude-code-plugin.log`(2026-05-20 修硬编码 bug 后跨平台默认值;旧版本写死 `D:/project/deskfox-plugins/claude-code/debug.log` — 我的开发机绝对路径,朋友机器上 `appendFileSync` 静默失败丢日志)。自定义路径用 `OPENCODE_CLAUDE_CODE_LOG_FILE`
 - **error 级别在 DEBUG 关时仍走 stderr** — sidecar stderr 可能被 DeskFox 主进程捕获,留唯一一类"无论如何留痕"
 
 ### 3.5 `install.ps1` + `install.bat`(新增)
@@ -96,6 +96,7 @@ Windows 用户一键装。流程:
 
 按时间倒序:
 
+- 2026-05-20 修 ProviderInitError 根因 — tsup 加 `noExternal: [/@ai-sdk\//]` 让 dist 真正 self-contained,详见 §10;同步修 logger 默认日志路径硬编码到我开发机的 bug;补 `.gitignore` 排除运行时残留(`debug.log` / `*.log` / `.claude/`);清上游遗留 5 个死文件(`mod.ts` / `jsr.json` / `test.ts` / `10097.patch` / `.github/workflows/publish.yml`)
 - 2026-05-13 image attachment 端到端跑通(image content block + modalities 字段)— 详见 §9
 - 2026-04-29 cwd 接 `_opencode` namespace(配套 deskfox-fork `41817499d`),Bug #1 闭环
 - 2026-04-29 install.ps1 + .bat 自动探测 + 配置写入 + 探测 native installer 路径
@@ -176,3 +177,95 @@ stream-json input 模式支持 `{type:"image", source:{type:"base64", media_type
 
 - PDF 支持:`mediaType === "application/pdf"` 时构造 `{type:"document", source:{type:"base64",...}}`,同时 `modalities.input` 加 `"pdf"`。Claude CLI 同样支持
 - 上传 URL 形态附件(opencode 是否会直接给 URL data 还没测过)
+
+## 10. ProviderInitError 与依赖 bundle 策略(2026-05-20)
+
+### 10.1 症状
+
+朋友机器装新版 plugin 后选 Claude Opus(via Claude Code),UI 立刻红条 `ProviderInitError`,
+任何 prompt 都过不去。其他 provider(OpenAI 等)正常。
+
+外部 AI 误诊为"opencode auth.json 没凭据"(`& opencode-cli.exe auth login` 修),
+但我们这个 plugin **不走 opencode auth 体系** — 鉴权完全在 spawn 出去的 `claude` CLI 内部
+(用户先前跑过 `claude login` 存的凭据),`opencode auth` 那套只对 OpenAI/Anthropic API key
+直连有用,跟本 plugin 无关。
+
+### 10.2 根因
+
+`dist/index.js` 头部:
+
+```js
+import { generateId } from "@ai-sdk/provider-utils";
+```
+
+这是**运行时外部依赖**。tsup 默认把 `package.json#dependencies` 视为 external 不 bundle。
+而 plugin 目录没有 `node_modules`(zip 不带,install 脚本不跑 npm install)。
+
+历史上能跑是因为 ESM resolver 沿 `node_modules` 向上找,命中了 DeskFox 内嵌
+opencode sidecar 自己 bundle 的 ai-sdk 副本(opencode 主程本来就是用 ai-sdk 写的)。
+**plugin 一直在借 host 的依赖,从未真正 self-contained**。
+
+DeskFox 升 opencode 到 `@opencode-ai/plugin@0.0.0--202605111441` 后改了 plugin
+加载策略,不再向 plugin 暴露主程 `node_modules` → plugin 顶部 import 失败 →
+opencode `provider.ts:1554` 包成 `ProviderInitError`。
+
+### 10.3 触发时序(便于以后排相似 bug)
+
+ProviderInitError 在 opencode 主程 **plugin init 阶段**抛,具体三步:
+
+```ts
+// opencode 主程 provider.ts:1544
+const mod = await import("file:///.../dist/index.js")   // ← 这一步加载顶部 import
+const fn = mod[Object.keys(mod).find((k) => k.startsWith("create"))!]
+const loaded = fn({ name: model.providerID, ...options })
+```
+
+任何一步抛错 → 主程 catch 后 `throw new InitError({ providerID }, { cause: e })`。
+本次 bug 卡在第 1 步(`import @ai-sdk/provider-utils` resolve 失败)。
+
+**注意此阶段不接触 `claude.exe`**。`createClaudeCode()` 只是把 `cliPath` 字符串存起来,
+不校验文件存不存在。哪怕 `cliPath: "不存在的路径"`,init 也会成功 — 真正的 spawn
+发生在用户发消息时(`doStream` → `session-manager.ts:53`),那时挂报的是别的错
+(`spawn ENOENT` 之类),**不是 ProviderInitError**。
+
+### 10.4 修法
+
+`tsup.config.ts` 加:
+
+```ts
+noExternal: [/@ai-sdk\//]
+```
+
+强制 bundle 所有 `@ai-sdk/*` 子包到 dist。
+
+- dist 体积:47KB → 57KB(+10KB 把 generateId 及其依赖链 inline)
+- zip 体积:43KB → 58KB
+- 用户机器**不再需要 plugin 目录有 `node_modules`**,真正"解压 install 就能用"
+
+### 10.5 验证手段(留作 release 前 checklist)
+
+release 前必跑:
+
+```bash
+grep '^import ' dist/index.js
+```
+
+顶部 import 应该**只有 Node 内建模块**(`crypto` / `fs` / `path` / `os` /
+`child_process` / `readline` / `events`)。任何 `from "@/[非 node:]"` 都视为待修。
+
+也可以 `grep '@ai-sdk' dist/index.js`,匹配到的应只有 tsup 加的 `// node_modules/@ai-sdk/...`
+**注释行**(表示 bundle 来源),不该有 `import ... from "@ai-sdk/..."` 语句。
+
+### 10.6 教训
+
+依赖 host 的 `node_modules` / sidecar bundle 是**脆弱协议** — host 升级一脚踩到,
+plugin 就挂。对外分发的 plugin 必须强制 self-contained,任何运行时外部 import
+都是潜在 ProviderInitError 触发器。
+
+未来加新 `dependencies` 时:
+
+1. tsup 默认 external 行为对发 npm 包合理,**对发 file:// dist 不合理** — 我们这条路上
+   `dependencies` 字段实际只是给 dev 时 tsc / IDE 看的类型,生产是要 bundle 的
+2. 加新包默认就该走 noExternal,或干脆 `noExternal: [/.*/]` 全量 bundle
+3. 等价方案:把这些包从 `dependencies` 挪到 `devDependencies` — tsup 默认会 bundle dev 依赖
+   (但 type-check 时 tsc 也需要它们,所以挪要小心。目前 noExternal 方案更稳)
