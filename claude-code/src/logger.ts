@@ -1,13 +1,15 @@
 // FORK 2026-04-29 默认关日志, 避免普通用户机器无限增长 debug.log.
 // 需要诊断时设系统环境变量 DEBUG=opencode-claude-code 后重启 DeskFox, plugin 会写日志到本文件.
 // 自定义日志路径: 设 OPENCODE_CLAUDE_CODE_LOG_FILE=<path>.
+// 默认路径放 ~/.config/opencode/ 跟 opencode.jsonc 配置同目录, 用户能找到; 跨平台兼容.
 import { appendFileSync, mkdirSync } from "node:fs"
 import path from "node:path"
+import os from "node:os"
 
 const DEBUG = process.env.DEBUG?.includes("opencode-claude-code") ?? false
 const LOG_FILE =
   process.env.OPENCODE_CLAUDE_CODE_LOG_FILE ??
-  "D:/project/deskfox-plugins/claude-code/debug.log"
+  path.join(os.homedir(), ".config", "opencode", "claude-code-plugin.log")
 
 if (DEBUG) {
   try {

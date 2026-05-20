@@ -3,3 +3,10 @@ node_modules/
 opencode/
 pnpm-lock.yaml
 yarn.lock
+
+# 运行时残留: DEBUG 开关打开后 logger 会写日志, 不入库
+debug.log
+*.log
+
+# Claude Code IDE 在 plugin 目录跑时落下的运行时状态, 不入库
+.claude/

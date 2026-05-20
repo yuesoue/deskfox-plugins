@@ -5,8 +5,9 @@ import { generateId } from "@ai-sdk/provider-utils";
 // src/logger.ts
 import { appendFileSync, mkdirSync } from "fs";
 import path from "path";
+import os from "os";
 var DEBUG = process.env.DEBUG?.includes("opencode-claude-code") ?? false;
-var LOG_FILE = process.env.OPENCODE_CLAUDE_CODE_LOG_FILE ?? "D:/project/deskfox-plugins/claude-code/debug.log";
+var LOG_FILE = process.env.OPENCODE_CLAUDE_CODE_LOG_FILE ?? path.join(os.homedir(), ".config", "opencode", "claude-code-plugin.log");
 if (DEBUG) {
   try {
     mkdirSync(path.dirname(LOG_FILE), { recursive: true });
