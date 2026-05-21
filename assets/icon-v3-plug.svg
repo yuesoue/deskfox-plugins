@@ -1,0 +1,34 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <!-- DeskFox Plugins · V3: 纯三角拼图（无狐脸），抽象插头/模块符号 -->
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#243353"/>
+      <stop offset="100%" stop-color="#172238"/>
+    </linearGradient>
+    <linearGradient id="block" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#9DBBE3"/>
+      <stop offset="100%" stop-color="#7295C4"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="56" fill="url(#bg)"/>
+
+  <!-- 中心一个由三角组成的"+"模块；珊瑚色 4 块外，蓝色 2 块组成中心方 -->
+  <g transform="translate(128, 128)">
+    <!-- 中心由两个浅蓝三角拼成的正方块 -->
+    <path d="M -28,-28 L 28,-28 L 28,28 Z" fill="url(#block)"/>
+    <path d="M -28,-28 L -28,28 L 28,28 Z" fill="#7295C4"/>
+
+    <!-- 上方珊瑚三角（"插头"上翘） -->
+    <path d="M -28,-28 L 28,-28 L 0,-72 Z" fill="#FF9A7A"/>
+    <!-- 下方珊瑚三角 -->
+    <path d="M -28,28 L 28,28 L 0,72 Z" fill="#FF9A7A"/>
+    <!-- 左侧珊瑚三角 -->
+    <path d="M -28,-28 L -28,28 L -72,0 Z" fill="#FF9A7A"/>
+    <!-- 右侧珊瑚三角 -->
+    <path d="M 28,-28 L 28,28 L 72,0 Z" fill="#FF9A7A"/>
+
+    <!-- 中心暗色三角点缀（呼应主品牌"中心嘴"的浅色对比） -->
+    <path d="M -12,-12 L 12,-12 L 0,12 Z" fill="#172238"/>
+  </g>
+</svg>
