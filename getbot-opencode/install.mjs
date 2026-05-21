@@ -46,9 +46,20 @@ function pluginFileUrl() {
   return /^[a-zA-Z]:/.test(norm) ? "file:///" + norm : "file://" + norm;
 }
 
+// 从安装包顶层 package.json 读版本号（单一来源）。打 zip 时 package.json 会随包一起进去。
+function readPkgVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
+    return typeof pkg.version === "string" && pkg.version ? pkg.version : "0.0.0-local";
+  } catch {
+    return "0.0.0-local";
+  }
+}
+const PKG_VERSION = readPkgVersion();
+
 const PLUGIN_PACKAGE_JSON = {
   name: "@getbot/opencode-plugin",
-  version: "0.0.0-local",
+  version: PKG_VERSION,
   private: true,
   type: "module",
   description: "getbot.me × OpenCode 多模态插件（image/tts/asr/translate/md2html + debug/logs/doctor）",

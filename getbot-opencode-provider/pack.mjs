@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 /**
- * 把 getbot-opencode-provider/ 自身打成 ../release/getbot-opencode-provider.zip
+ * 把 getbot-opencode-provider/ 自身打成 ../release/getbot-opencode-provider-<version>.zip
+ *
+ * 版本号来自同目录的 package.json#version（单一来源）；package.json 会随包一起打进 zip。
  *
  * provider 版 —— 与普通版 getbot-opencode/pack.mjs 的唯一差别是 zip 文件名，
  * 便于用户下载时区分。打包时仍排除 pack.mjs / dist / _docs / _smoke。
  *
  * 用法：node getbot-opencode-provider/pack.mjs（从 deskfox-plugins 仓库根跑）
  *
- * 输出位置：deskfox-plugins/release/getbot-opencode-provider.zip
+ * 输出位置：deskfox-plugins/release/getbot-opencode-provider-<version>.zip
  */
 
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync } from "node:fs";
@@ -17,7 +19,9 @@ import { deflateRawSync, crc32 } from "node:zlib";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = __dirname;                                                          // 插件目录本身
-const OUT = resolve(__dirname, "..", "release", "getbot-opencode-provider.zip");     // 打包产物
+const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
+const VERSION = PKG.version;
+const OUT = resolve(__dirname, "..", "release", `getbot-opencode-provider-${VERSION}.zip`);     // 打包产物
 const SELF_NAME = "pack.mjs";
 
 // 不打进 zip 的顶层子项：
@@ -139,6 +143,7 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, "/")}` || fileU
   const totalRaw = entries.reduce((a, e) => a + e.size, 0);
   const outSize = statSync(OUT).size;
   console.log(`✓ 打包完成：${OUT}`);
+  console.log(`  版本：${VERSION}`);
   console.log(`  条目 ${entries.length} 个 / 源大小 ${(totalRaw / 1024).toFixed(1)}KB → zip ${(outSize / 1024).toFixed(1)}KB`);
   console.log(`  已排除：${[...EXCLUDE_TOP].join(", ")}`);
   console.log("  所有文件名使用 UTF-8 flag，跨平台解压中文名不会 mojibake");

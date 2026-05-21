@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
- * 把 getbot-opencode/ 自身打成 ../release/getbot-opencode.zip
+ * 把 getbot-opencode/ 自身打成 ../release/getbot-opencode-<version>.zip
+ *
+ * 版本号来自同目录的 package.json#version（单一来源）；package.json 会随包一起打进 zip。
  *
  * 为什么不用 PowerShell Compress-Archive：它不设 UTF-8 filename flag（0x0800），
  * 导致中文文件名在 macOS/Linux 上解压出现 mojibake。这里手写 ZIP 结构并显式
@@ -8,7 +10,7 @@
  *
  * 用法：node getbot-opencode/pack.mjs（从 deskfox-plugins 仓库根跑）
  *
- * 输出位置：deskfox-plugins/release/getbot-opencode.zip
+ * 输出位置：deskfox-plugins/release/getbot-opencode-<version>.zip
  * （与 claude-code 等其他插件的 zip 共用同一个 release/ 发行目录）
  */
 
@@ -19,7 +21,9 @@ import { deflateRawSync, crc32 } from "node:zlib";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = __dirname;                                              // 插件目录本身
-const OUT = resolve(__dirname, "..", "release", "getbot-opencode.zip");  // 打包产物（仓库根 /release/）
+const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
+const VERSION = PKG.version;
+const OUT = resolve(__dirname, "..", "release", `getbot-opencode-${VERSION}.zip`);  // 打包产物（仓库根 /release/）
 const SELF_NAME = "pack.mjs";
 
 // 不打进 zip 的顶层子项：
@@ -141,6 +145,7 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, "/")}` || fileU
   const totalRaw = entries.reduce((a, e) => a + e.size, 0);
   const outSize = statSync(OUT).size;
   console.log(`✓ 打包完成：${OUT}`);
+  console.log(`  版本：${VERSION}`);
   console.log(`  条目 ${entries.length} 个 / 源大小 ${(totalRaw / 1024).toFixed(1)}KB → zip ${(outSize / 1024).toFixed(1)}KB`);
   console.log(`  已排除：${[...EXCLUDE_TOP].join(", ")}`);
   console.log("  所有文件名使用 UTF-8 flag，跨平台解压中文名不会 mojibake");

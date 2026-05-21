@@ -1,0 +1,11 @@
+{
+  "name": "getbot-opencode-provider",
+  "version": "0.1.0",
+  "private": true,
+  "description": "getbot.me × OpenCode 多模态插件安装包（provider 版：额外注入 chat provider 到 opencode.jsonc）",
+  "type": "module",
+  "scripts": {
+    "pack": "node pack.mjs",
+    "install:plugin": "node install.mjs"
+  }
+}
