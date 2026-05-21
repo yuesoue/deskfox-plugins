@@ -15,8 +15,15 @@ fi
 # ---------- 路径 ----------
 PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_PATH="$PLUGIN_ROOT/dist/index.js"
+PKG_JSON="$PLUGIN_ROOT/package.json"
 CONFIG_DIR="$HOME/.config/opencode"
 CONFIG_JSONC="$CONFIG_DIR/opencode.jsonc"
+
+# 读取 plugin 自身版本号 (失败不致命, 装完打印用)
+PLUGIN_VERSION="unknown"
+if [[ -f "$PKG_JSON" ]]; then
+  PLUGIN_VERSION="$(grep -E '"version"' "$PKG_JSON" | head -1 | sed -E 's/.*"version"[^"]*"([^"]+)".*/\1/')" || PLUGIN_VERSION="unknown"
+fi
 
 echo
 echo "${C_CYAN}DeskFox claude-code plugin 安装器 (macOS / Linux)${C_RESET}"
@@ -216,7 +223,7 @@ echo "${C_GREEN}[3/4] config 已更新: $CONFIG_JSONC${C_RESET}"
 
 # ---------- Step 4: 完成 ----------
 echo
-echo "${C_GREEN}[4/4] 安装完成${C_RESET}"
+echo "${C_GREEN}[4/4] 安装完成  (claude-code plugin v$PLUGIN_VERSION)${C_RESET}"
 echo
 echo "${C_CYAN}下一步:${C_RESET}"
 echo "  1. 完全退出 DeskFox(macOS: Cmd+Q,确保后台 sidecar opencode-cli 也关掉:"

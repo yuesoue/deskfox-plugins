@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
- * 把 claude-code/ 自身打成 ../release/claude-code.zip
+ * 把 claude-code/ 自身打成 ../release/claude-code-<version>.zip
+ *
+ * 版本号来自同目录的 package.json#version（单一来源）；package.json 会随包一起打进 zip。
  *
  * 为什么不用 PowerShell Compress-Archive：它不设 UTF-8 filename flag（0x0800），
  * 导致中文文件名在 macOS/Linux 上解压出现 mojibake。这里手写 ZIP 结构并显式
@@ -8,7 +10,7 @@
  *
  * 用法：node claude-code/pack.mjs（从 deskfox-plugins 仓库根跑）
  *
- * 输出位置：deskfox-plugins/release/claude-code.zip
+ * 输出位置：deskfox-plugins/release/claude-code-<version>.zip
  * （与 getbot-opencode 等其他插件的 zip 共用同一个 release/ 发行目录）
  *
  * 前置条件：dist/ 必须最新（先在 claude-code/ 里跑 `bun run build`）
@@ -20,8 +22,10 @@ import { fileURLToPath } from "node:url";
 import { deflateRawSync, crc32 } from "node:zlib";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SRC_DIR = __dirname;                                             // 插件目录本身
-const OUT = resolve(__dirname, "..", "release", "claude-code.zip");    // 打包产物（仓库根 /release/）
+const SRC_DIR = __dirname;                                                       // 插件目录本身
+const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
+const VERSION = PKG.version;
+const OUT = resolve(__dirname, "..", "release", `claude-code-${VERSION}.zip`);   // 打包产物（仓库根 /release/）
 const SELF_NAME = "pack.mjs";
 
 // 不打进 zip 的顶层子项 —— 用户安装时只需要 install.* + dist/ + README + package.json，
@@ -30,18 +34,13 @@ const EXCLUDE_TOP = new Set([
   SELF_NAME,                       // 打包脚本自身
   "node_modules",                  // 依赖：用户不需要（dist 已 bundle）
   "src",                           // TS 源码：用户用编译产物 dist/
-  "test.ts",                       // 单测
   "tsconfig.json",                 // TS 配置
   "tsup.config.ts",                // 打包配置
   "bun.lock",                      // 锁文件
   "debug.log",                     // 本地调试日志
-  "10097.patch",                   // 上游 PR 补丁，开发参考
   "HANDOFF-deskfox-fork.md",       // 开发交接文档
   "HANDOFF-deskfox-fork-2-cwd.md", // 开发交接文档
   "NOTES.md",                      // 开发笔记
-  "jsr.json",                      // JSR 发布元数据，本地分发不需要
-  "mod.ts",                        // JSR 入口源文件，对应也不需要
-  ".github",                       // CI 工作流
   ".gitignore",                    // git 元数据
   ".git",                          // 不应在源目录，保险
   ".claude",                       // Claude Code 运行时数据（scheduled_tasks.lock 等）
@@ -166,6 +165,7 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, "/")}` || fileU
   const totalRaw = entries.reduce((a, e) => a + e.size, 0);
   const outSize = statSync(OUT).size;
   console.log(`✓ 打包完成：${OUT}`);
+  console.log(`  版本：${VERSION}`);
   console.log(`  条目 ${entries.length} 个 / 源大小 ${(totalRaw / 1024).toFixed(1)}KB → zip ${(outSize / 1024).toFixed(1)}KB`);
   console.log(`  已排除：${[...EXCLUDE_TOP].join(", ")}`);
   console.log("  所有文件名使用 UTF-8 flag，跨平台解压中文名不会 mojibake");

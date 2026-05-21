@@ -96,6 +96,7 @@ Windows 用户一键装。流程:
 
 按时间倒序:
 
+- 2026-05-20 **发版 v0.1.3** — 含 ProviderInitError 修复 + 诊断版本号埋点(dist log 启动行 / install 脚本结尾打印 / zip 命名带版本号 `claude-code-0.1.3.zip`),详见 §10
 - 2026-05-20 修 ProviderInitError 根因 — tsup 加 `noExternal: [/@ai-sdk\//]` 让 dist 真正 self-contained,详见 §10;同步修 logger 默认日志路径硬编码到我开发机的 bug;补 `.gitignore` 排除运行时残留(`debug.log` / `*.log` / `.claude/`);清上游遗留 5 个死文件(`mod.ts` / `jsr.json` / `test.ts` / `10097.patch` / `.github/workflows/publish.yml`)
 - 2026-05-13 image attachment 端到端跑通(image content block + modalities 字段)— 详见 §9
 - 2026-04-29 cwd 接 `_opencode` namespace(配套 deskfox-fork `41817499d`),Bug #1 闭环
@@ -178,7 +179,7 @@ stream-json input 模式支持 `{type:"image", source:{type:"base64", media_type
 - PDF 支持:`mediaType === "application/pdf"` 时构造 `{type:"document", source:{type:"base64",...}}`,同时 `modalities.input` 加 `"pdf"`。Claude CLI 同样支持
 - 上传 URL 形态附件(opencode 是否会直接给 URL data 还没测过)
 
-## 10. ProviderInitError 与依赖 bundle 策略(2026-05-20)
+## 10. ProviderInitError 与依赖 bundle 策略(2026-05-20,v0.1.3)
 
 ### 10.1 症状
 
@@ -269,3 +270,20 @@ plugin 就挂。对外分发的 plugin 必须强制 self-contained,任何运行�
 2. 加新包默认就该走 noExternal,或干脆 `noExternal: [/.*/]` 全量 bundle
 3. 等价方案:把这些包从 `dependencies` 挪到 `devDependencies` — tsup 默认会 bundle dev 依赖
    (但 type-check 时 tsc 也需要它们,所以挪要小心。目前 noExternal 方案更稳)
+
+### 10.7 配套加的诊断版本号埋点(v0.1.3)
+
+经验:上面这种"装上就坏"的 bug,朋友/未来诊断时第一个问题永远是"你装的是哪版?"。
+v0.1.3 加了三处版本号埋点,以后诊断不用再问:
+
+1. **`tsup.config.ts` 注入 `process.env.PLUGIN_VERSION`** — 编译期把 `package.json#version`
+   字面量化进 dist。零运行时开销,纯编译期替换
+2. **`src/index.ts` `createClaudeCode()` 入口 log 一次** — `log.info("plugin loaded", { version, cliPath, cwd, ... })`,
+   DEBUG 开启时,DeskFox 重启选 Claude 模型,plugin log 第一行就有版本号 + 配置快照
+3. **install.ps1 / install.sh 结尾打印** `[4/4] 安装完成 (claude-code plugin v0.1.3)`,
+   读 `package.json#version`,装完用户/朋友立刻能看见装的是哪版
+
+同步 `pack.mjs` 输出文件名带版本(`claude-code-0.1.3.zip`),对齐 getbot-opencode 命名约定。
+未来 bump version 时:
+- `package.json#version` 改一处,zip 名 / dist log / install 输出**全部自动跟随**
+- 不必去 install 脚本手动改

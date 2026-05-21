@@ -5,6 +5,15 @@ $ErrorActionPreference = 'Stop'
 
 $PluginRoot = $PSScriptRoot
 $DistPath = Join-Path $PluginRoot 'dist\index.js'
+$PkgJson = Join-Path $PluginRoot 'package.json'
+
+# 读取 plugin 自身版本号 (失败不致命, 装完打印用)
+$PluginVersion = "unknown"
+if (Test-Path $PkgJson) {
+  try {
+    $PluginVersion = (Get-Content $PkgJson -Raw | ConvertFrom-Json).version
+  } catch {}
+}
 
 # Windows 下 opencode 配置目录: ~/.config/opencode/(xdg-basedir 在 Windows 走 POSIX fallback)
 $ConfigDir = Join-Path $env:USERPROFILE '.config\opencode'
@@ -181,7 +190,7 @@ Write-Host "[3/4] config 已更新: $ConfigJsonc" -ForegroundColor Green
 
 # ---------- Step 4: 完成 ----------
 Write-Host ""
-Write-Host "[4/4] 安装完成" -ForegroundColor Green
+Write-Host "[4/4] 安装完成  (claude-code plugin v$PluginVersion)" -ForegroundColor Green
 Write-Host ""
 Write-Host "下一步:" -ForegroundColor Cyan
 Write-Host "  1. 完全退出 DeskFox(任务栏右键退出,确保 sidecar opencode-cli 也关掉)"

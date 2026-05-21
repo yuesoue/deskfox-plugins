@@ -1708,10 +1708,17 @@ ${plan}
 };
 
 // src/index.ts
+var PLUGIN_VERSION = "0.1.3";
 function createClaudeCode(settings = {}) {
   const cliPath = settings.cliPath ?? process.env.CLAUDE_CLI_PATH ?? "claude";
   const cwd = settings.cwd ?? process.cwd();
   const providerName = settings.name ?? "claude-code";
+  log.info("plugin loaded", {
+    version: PLUGIN_VERSION,
+    cliPath,
+    cwd,
+    providerName
+  });
   const createModel = (modelId) => {
     return new ClaudeCodeLanguageModel(modelId, {
       provider: providerName,
@@ -1728,6 +1735,7 @@ function createClaudeCode(settings = {}) {
 }
 export {
   ClaudeCodeLanguageModel,
+  PLUGIN_VERSION,
   createClaudeCode
 };
 //# sourceMappingURL=index.js.map

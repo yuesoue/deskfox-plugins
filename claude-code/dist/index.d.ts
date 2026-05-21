@@ -94,10 +94,11 @@ declare class ClaudeCodeLanguageModel implements LanguageModelV2 {
     doStream(options: Parameters<LanguageModelV2["doStream"]>[0]): Promise<Awaited<ReturnType<LanguageModelV2["doStream"]>>>;
 }
 
+declare const PLUGIN_VERSION: string;
 interface ClaudeCodeProvider extends ProviderV2 {
     (modelId: string): LanguageModelV2;
     languageModel(modelId: string): LanguageModelV2;
 }
 declare function createClaudeCode(settings?: ClaudeCodeProviderSettings): ClaudeCodeProvider;
 
-export { type ClaudeCodeConfig, ClaudeCodeLanguageModel, type ClaudeCodeProvider, type ClaudeCodeProviderSettings, type ClaudeStreamMessage, createClaudeCode };
+export { type ClaudeCodeConfig, ClaudeCodeLanguageModel, type ClaudeCodeProvider, type ClaudeCodeProviderSettings, type ClaudeStreamMessage, PLUGIN_VERSION, createClaudeCode };
