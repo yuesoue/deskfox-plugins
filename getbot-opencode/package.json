@@ -1,6 +1,6 @@
 {
   "name": "getbot-opencode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "getbot.me × OpenCode 多模态插件安装包（image/tts/asr/translate/md2html + debug/logs/doctor）",
   "type": "module",
