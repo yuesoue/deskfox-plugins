@@ -143,7 +143,7 @@ $claudeCodeProvider = [PSCustomObject]@{
 # 读取或新建 config 对象
 $cfgObj = $null
 if (Test-Path $ConfigJsonc) {
-  $rawText = Get-Content $ConfigJsonc -Raw
+  $rawText = Get-Content $ConfigJsonc -Raw -Encoding UTF8
   if ($rawText -and $rawText.Trim()) {
     try {
       $cfgObj = $rawText | ConvertFrom-Json -ErrorAction Stop

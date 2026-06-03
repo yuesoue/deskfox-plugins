@@ -130,6 +130,7 @@ var require_secure_json_parse = __commonJS({
 
 // src/claude-code-language-model.ts
 import { createHash } from "crypto";
+import { existsSync as existsSync2 } from "fs";
 
 // node_modules/@ai-sdk/provider-utils/node_modules/@ai-sdk/provider/dist/index.mjs
 var marker = "vercel.ai.error";
@@ -290,6 +291,11 @@ import path from "path";
 import os from "os";
 var DEBUG = process.env.DEBUG?.includes("opencode-claude-code") ?? false;
 var LOG_FILE = process.env.OPENCODE_CLAUDE_CODE_LOG_FILE ?? path.join(os.homedir(), ".config", "opencode", "claude-code-plugin.log");
+var ERROR_LOG_FILE = path.join(os.homedir(), ".config", "opencode", "claude-code-error.log");
+try {
+  mkdirSync(path.dirname(ERROR_LOG_FILE), { recursive: true });
+} catch {
+}
 if (DEBUG) {
   try {
     mkdirSync(path.dirname(LOG_FILE), { recursive: true });
@@ -318,12 +324,15 @@ var log = {
   warn(msg, data) {
     write(fmt("WARN", msg, data));
   },
-  // error 在关 DEBUG 时也走 stderr — sidecar stderr 可能被 DeskFox 主进程捕获到日志.
-  // 这是 plugin 唯一一类"无论如何也要留痕"的 log level.
+  // error 无论 DEBUG 开关: 同时写 stderr + claude-code-error.log, 确保 spawn 失败可复现.
   error(msg, data) {
     const line = fmt("ERROR", msg, data);
     if (DEBUG) write(line);
-    else console.error(line);
+    console.error(line);
+    try {
+      appendFileSync(ERROR_LOG_FILE, line + "\n");
+    } catch {
+    }
   },
   debug(msg, data) {
     write(fmt("DEBUG", msg, data));
@@ -620,9 +629,10 @@ Now continuing with the current message:
 }
 
 // src/session-manager.ts
-import { spawn } from "child_process";
+import { spawn, execFileSync } from "child_process";
 import { createInterface } from "readline";
 import { EventEmitter } from "events";
+import { existsSync } from "fs";
 var activeProcesses = /* @__PURE__ */ new Map();
 var claudeSessions = /* @__PURE__ */ new Map();
 function getActiveProcess(key) {
@@ -644,12 +654,69 @@ function setClaudeSessionId(key, sessionId) {
 function deleteClaudeSessionId(key) {
   claudeSessions.delete(key);
 }
+var cliPathCache = null;
+function findClaudeOnPath() {
+  try {
+    const cmd = process.platform === "win32" ? "where" : "which";
+    const out = execFileSync(cmd, ["claude"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    const first = out.split(/\r?\n/)[0]?.trim();
+    return first || null;
+  } catch {
+    return null;
+  }
+}
+function resolveCliPath(cliPath) {
+  if (cliPathCache && cliPathCache.input === cliPath) return cliPathCache.output;
+  const looksLikePath = /[\\/]/.test(cliPath) || /^[a-zA-Z]:/.test(cliPath);
+  if (!looksLikePath) {
+    cliPathCache = { input: cliPath, output: cliPath };
+    return cliPath;
+  }
+  if (existsSync(cliPath)) {
+    cliPathCache = { input: cliPath, output: cliPath };
+    return cliPath;
+  }
+  const fromPath = findClaudeOnPath();
+  if (fromPath) {
+    log.error("configured cliPath invalid, auto-recovered from PATH", {
+      configured: cliPath,
+      recovered: fromPath,
+      hint: "opencode.jsonc \u91CC Windows \u8DEF\u5F84\u53CD\u659C\u6760\u8981\u5199\u53CC\u53CD\u659C\u6760 \\\\ \u6216\u6B63\u659C\u6760 /;\u5355 \\ \u4F1A\u88AB JSON \u89E3\u6790\u541E\u6389"
+    });
+    cliPathCache = { input: cliPath, output: fromPath };
+    return fromPath;
+  }
+  throw new Error(
+    `claude CLI \u672A\u627E\u5230: \u914D\u7F6E\u7684 cliPath="${cliPath}" \u4E0D\u5B58\u5728, \u4E14\u7CFB\u7EDF PATH \u91CC\u4E5F\u6CA1\u6709 claude\u3002
+\u8BF7\u68C0\u67E5 ~/.config/opencode/opencode.jsonc \u7684 provider.claude-code.options.cliPath\u3002
+Windows \u8DEF\u5F84\u53CD\u659C\u6760\u9700\u5199\u6210\u53CC\u53CD\u659C\u6760(C:\\\\Users\\\\...)\u6216\u6B63\u659C\u6760(C:/Users/...)\u3002`
+  );
+}
 function spawnClaudeProcess(cliPath, cliArgs, cwd, sessionKey2) {
-  log.info("spawning new claude process", { cliPath, cliArgs, cwd, sessionKey: sessionKey2 });
-  const proc = spawn(cliPath, cliArgs, {
-    cwd,
+  const effectiveCwd = cwd && existsSync(cwd) ? cwd : process.cwd();
+  if (effectiveCwd !== cwd) {
+    log.warn("cwd invalid or missing, falling back to process.cwd()", {
+      requested: cwd,
+      effective: effectiveCwd
+    });
+  }
+  const effectiveCliPath = resolveCliPath(cliPath);
+  log.info("spawning new claude process", { cliPath: effectiveCliPath, cliArgs, cwd: effectiveCwd, sessionKey: sessionKey2 });
+  const proc = spawn(effectiveCliPath, cliArgs, {
+    cwd: effectiveCwd,
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, TERM: "xterm-256color" }
+  });
+  proc.on("error", (err) => {
+    log.error("claude process spawn failed", {
+      error: err?.message ?? String(err),
+      code: err?.code,
+      cliPath: effectiveCliPath,
+      cwd: effectiveCwd
+    });
   });
   const lineEmitter = new EventEmitter();
   const rl = createInterface({ input: proc.stdout });
@@ -822,7 +889,7 @@ var ClaudeCodeLanguageModel = class {
     const warnings = [];
     const providerCwd = options.providerOptions?._opencode?.cwd;
     const opencodeSessionId = options.providerOptions?._opencode?.sessionID ?? fingerprintFromPrompt(options.prompt);
-    const cwd = providerCwd ?? this.config.cwd ?? process.cwd();
+    const cwd = providerCwd && existsSync2(providerCwd) ? providerCwd : this.config.cwd || process.cwd();
     const scope = this.requestScope(options);
     const sk = sessionKey(cwd, `${this.modelId}::${scope}`, opencodeSessionId);
     if (scope === "no-tools") {
@@ -905,7 +972,7 @@ var ClaudeCodeLanguageModel = class {
     });
     const { spawn: spawn2 } = await import("child_process");
     const { createInterface: createInterface2 } = await import("readline");
-    const proc = spawn2(this.config.cliPath, cliArgs, {
+    const proc = spawn2(resolveCliPath(this.config.cliPath), cliArgs, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, TERM: "xterm-256color" }
@@ -1019,7 +1086,11 @@ ${plan}
         });
       });
       proc.on("error", (err) => {
-        log.error("process error", { error: err.message });
+        log.error("process error (doGenerate)", {
+          error: err.message,
+          cliPath: this.config.cliPath,
+          cwd
+        });
         reject(err);
       });
       proc.stderr?.on("data", (data) => {
@@ -1092,7 +1163,7 @@ ${plan}
     const warnings = [];
     const providerCwd = options.providerOptions?._opencode?.cwd;
     const opencodeSessionId = options.providerOptions?._opencode?.sessionID ?? fingerprintFromPrompt(options.prompt);
-    const cwd = providerCwd ?? this.config.cwd ?? process.cwd();
+    const cwd = providerCwd && existsSync2(providerCwd) ? providerCwd : this.config.cwd || process.cwd();
     const cliPath = this.config.cliPath;
     const skipPermissions = this.config.skipPermissions !== false;
     const scope = this.requestScope(options);
@@ -1665,7 +1736,12 @@ ${plan}
         lineEmitter.on("line", lineHandler);
         lineEmitter.on("close", closeHandler);
         proc.on("error", (err) => {
-          log.error("process error", { error: err.message });
+          log.error("process error (doStream)", {
+            error: err.message,
+            code: err.code,
+            cliPath,
+            cwd
+          });
           if (controllerClosed) return;
           controllerClosed = true;
           controller.enqueue({ type: "error", error: err });
@@ -1708,7 +1784,7 @@ ${plan}
 };
 
 // src/index.ts
-var PLUGIN_VERSION = "0.1.3";
+var PLUGIN_VERSION = "0.1.5";
 function createClaudeCode(settings = {}) {
   const cliPath = settings.cliPath ?? process.env.CLAUDE_CLI_PATH ?? "claude";
   const cwd = settings.cwd ?? process.cwd();

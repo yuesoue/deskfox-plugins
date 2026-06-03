@@ -1,6 +1,7 @@
-import { spawn, type ChildProcess } from "node:child_process"
+import { spawn, execFileSync, type ChildProcess } from "node:child_process"
 import { createInterface } from "node:readline"
 import { EventEmitter } from "node:events"
+import { existsSync } from "node:fs"
 import { log } from "./logger.js"
 
 export interface ActiveProcess {
@@ -42,18 +43,94 @@ export function deleteClaudeSessionId(key: string): void {
   claudeSessions.delete(key)
 }
 
+// FORK 2026-06-03 (cliPath robustness): 解析 + 自愈 cliPath。
+// 背景: opencode.jsonc 里 Windows 路径若写成单反斜杠 "C:\Users\..."(非法 JSON),
+// 宽松 jsonc 解析器会静默吞掉反斜杠 → plugin 收到 "C:Users..." → spawn 报 ENOENT / uv_spawn
+// EUNKNOWN,错误晦涩难自查。这里在 spawn 前验证 cliPath,无效时自动 fallback 到 PATH 里的 claude,
+// 彻底找不到才抛清晰中文错误。结果缓存,避免每次 spawn 都跑 where/which。
+let cliPathCache: { input: string; output: string } | null = null
+
+function findClaudeOnPath(): string | null {
+  try {
+    const cmd = process.platform === "win32" ? "where" : "which"
+    const out = execFileSync(cmd, ["claude"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim()
+    const first = out.split(/\r?\n/)[0]?.trim()
+    return first || null
+  } catch {
+    return null
+  }
+}
+
+export function resolveCliPath(cliPath: string): string {
+  if (cliPathCache && cliPathCache.input === cliPath) return cliPathCache.output
+
+  const looksLikePath = /[\\/]/.test(cliPath) || /^[a-zA-Z]:/.test(cliPath)
+  // 裸命令名(如 "claude")→ 交给系统 PATH 解析,不做存在性检查
+  if (!looksLikePath) {
+    cliPathCache = { input: cliPath, output: cliPath }
+    return cliPath
+  }
+  // 显式路径存在 → 直接用
+  if (existsSync(cliPath)) {
+    cliPathCache = { input: cliPath, output: cliPath }
+    return cliPath
+  }
+  // 路径无效(典型: jsonc 单反斜杠被吞成 "C:Users...")→ 自愈: 从 PATH 找 claude
+  const fromPath = findClaudeOnPath()
+  if (fromPath) {
+    log.error("configured cliPath invalid, auto-recovered from PATH", {
+      configured: cliPath,
+      recovered: fromPath,
+      hint: "opencode.jsonc 里 Windows 路径反斜杠要写双反斜杠 \\\\ 或正斜杠 /;单 \\ 会被 JSON 解析吞掉",
+    })
+    cliPathCache = { input: cliPath, output: fromPath }
+    return fromPath
+  }
+  // 彻底找不到 → 抛清晰错误(中文,可诊断)
+  throw new Error(
+    `claude CLI 未找到: 配置的 cliPath="${cliPath}" 不存在, 且系统 PATH 里也没有 claude。\n` +
+      `请检查 ~/.config/opencode/opencode.jsonc 的 provider.claude-code.options.cliPath。\n` +
+      `Windows 路径反斜杠需写成双反斜杠(C:\\\\Users\\\\...)或正斜杠(C:/Users/...)。`,
+  )
+}
+
 export function spawnClaudeProcess(
   cliPath: string,
   cliArgs: string[],
   cwd: string,
   sessionKey: string,
 ): ActiveProcess {
-  log.info("spawning new claude process", { cliPath, cliArgs, cwd, sessionKey })
+  // Validate CWD: fall back to process.cwd() if missing or non-existent.
+  // An invalid CWD causes uv_spawn to fail with EUNKNOWN on Windows.
+  const effectiveCwd = (cwd && existsSync(cwd)) ? cwd : process.cwd()
+  if (effectiveCwd !== cwd) {
+    log.warn("cwd invalid or missing, falling back to process.cwd()", {
+      requested: cwd,
+      effective: effectiveCwd,
+    })
+  }
 
-  const proc = spawn(cliPath, cliArgs, {
-    cwd,
+  const effectiveCliPath = resolveCliPath(cliPath)
+  log.info("spawning new claude process", { cliPath: effectiveCliPath, cliArgs, cwd: effectiveCwd, sessionKey })
+
+  const proc = spawn(effectiveCliPath, cliArgs, {
+    cwd: effectiveCwd,
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, TERM: "xterm-256color" },
+  })
+
+  // FORK 2026-06-03 (cliPath robustness): spawn 失败(ENOENT / EUNKNOWN 等)挂 error handler,
+  // 把 cliPath / cwd 现场写进 error log。此前缺此 handler → spawn 失败不留日志, 难诊断。
+  proc.on("error", (err: NodeJS.ErrnoException) => {
+    log.error("claude process spawn failed", {
+      error: err?.message ?? String(err),
+      code: err?.code,
+      cliPath: effectiveCliPath,
+      cwd: effectiveCwd,
+    })
   })
 
   const lineEmitter = new EventEmitter()

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { existsSync } from "node:fs"
 import type {
   LanguageModelV2,
   LanguageModelV2CallWarning,
@@ -14,6 +15,7 @@ import { getClaudeUserMessage } from "./message-builder.js"
 import {
   getActiveProcess,
   spawnClaudeProcess,
+  resolveCliPath,
   buildCliArgs,
   setClaudeSessionId,
   getClaudeSessionId,
@@ -183,7 +185,10 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     const opencodeSessionId =
       (options.providerOptions as any)?._opencode?.sessionID ??
       fingerprintFromPrompt(options.prompt)
-    const cwd = providerCwd ?? this.config.cwd ?? process.cwd()
+    // Use || not ?? so empty-string CWD (possible from DeskFox) falls back correctly.
+    const cwd = (providerCwd && existsSync(providerCwd))
+      ? providerCwd
+      : this.config.cwd || process.cwd()
     const scope = this.requestScope(options as any)
     const sk = sessionKey(cwd, `${this.modelId}::${scope}`, opencodeSessionId)
 
@@ -284,7 +289,8 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     const { spawn } = await import("node:child_process")
     const { createInterface } = await import("node:readline")
 
-    const proc = spawn(this.config.cliPath, cliArgs, {
+    // FORK 2026-06-03 (cliPath robustness): 同 spawnClaudeProcess,解析 + 自愈 cliPath。
+    const proc = spawn(resolveCliPath(this.config.cliPath), cliArgs, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, TERM: "xterm-256color" },
@@ -432,7 +438,11 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
       })
 
       proc.on("error", (err) => {
-        log.error("process error", { error: err.message })
+        log.error("process error (doGenerate)", {
+          error: err.message,
+          cliPath: this.config.cliPath,
+          cwd,
+        })
         reject(err)
       })
 
@@ -522,7 +532,10 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     const opencodeSessionId =
       (options.providerOptions as any)?._opencode?.sessionID ??
       fingerprintFromPrompt(options.prompt)
-    const cwd = providerCwd ?? this.config.cwd ?? process.cwd()
+    // Use || not ?? so empty-string CWD (possible from DeskFox) falls back correctly.
+    const cwd = (providerCwd && existsSync(providerCwd))
+      ? providerCwd
+      : this.config.cwd || process.cwd()
     const cliPath = this.config.cliPath
     const skipPermissions = this.config.skipPermissions !== false
     const scope = this.requestScope(options as any)
@@ -1213,7 +1226,12 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
         lineEmitter.on("close", closeHandler)
 
         proc.on("error", (err: Error) => {
-          log.error("process error", { error: err.message })
+          log.error("process error (doStream)", {
+            error: err.message,
+            code: (err as any).code,
+            cliPath,
+            cwd,
+          })
           if (controllerClosed) return
           controllerClosed = true
           controller.enqueue({ type: "error", error: err })
