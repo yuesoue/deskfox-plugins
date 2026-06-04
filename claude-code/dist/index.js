@@ -779,6 +779,61 @@ function sessionKey(cwd, modelId, opencodeSessionId) {
   return `${cwd}::${modelId}::${opencodeSessionId ?? "default"}`;
 }
 
+// src/firehose-guard.ts
+var DEFAULT_FIREHOSE_LIMITS = {
+  // 32K 字符 ≈ 8K token 的思考,展示足够;再多对用户无意义,纯内存负担
+  maxReasoningChars: 32e3,
+  // 单个 tool 入参里的大字段 (如 Write 的 file content) 截到 16K 字符
+  maxToolInputChars: 16e3
+};
+var REASONING_TRUNCATION_NOTICE = "\n\n\u2026[\u601D\u8003\u8FC7\u7A0B\u8FC7\u957F\uFF0C\u5DF2\u7701\u7565\u5269\u4F59\u90E8\u5206\u4EE5\u4FDD\u62A4\u5185\u5B58]\n\n";
+function truncationNote(original, kept) {
+  return `\u2026[\u5DF2\u622A\u65AD ${original - kept} \u5B57\u7B26\u4EE5\u4FDD\u62A4\u5185\u5B58]`;
+}
+function clampReasoning(text, limits = DEFAULT_FIREHOSE_LIMITS) {
+  if (text.length <= limits.maxReasoningChars) return text;
+  return text.slice(0, limits.maxReasoningChars) + REASONING_TRUNCATION_NOTICE;
+}
+function clampToolInput(input, maxChars = DEFAULT_FIREHOSE_LIMITS.maxToolInputChars) {
+  if (typeof input === "string") {
+    if (input.length <= maxChars) return input;
+    return input.slice(0, maxChars) + truncationNote(input.length, maxChars);
+  }
+  if (Array.isArray(input)) {
+    return input.map((v) => clampToolInput(v, maxChars));
+  }
+  if (input && typeof input === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(input)) {
+      out[k] = clampToolInput(v, maxChars);
+    }
+    return out;
+  }
+  return input;
+}
+function createFirehoseGuard(limits = DEFAULT_FIREHOSE_LIMITS) {
+  let reasoningChars = 0;
+  let reasoningTruncated = false;
+  return {
+    filterReasoning(delta) {
+      if (!delta) return "";
+      if (reasoningTruncated) return "";
+      reasoningChars += delta.length;
+      if (reasoningChars >= limits.maxReasoningChars) {
+        reasoningTruncated = true;
+        return REASONING_TRUNCATION_NOTICE;
+      }
+      return delta;
+    },
+    clampToolInput(input) {
+      return clampToolInput(input, limits.maxToolInputChars);
+    },
+    isReasoningTruncated() {
+      return reasoningTruncated;
+    }
+  };
+}
+
 // src/claude-code-language-model.ts
 function makeUsage(input, output) {
   return {
@@ -1102,7 +1157,8 @@ ${plan}
     if (result.thinking) {
       content.push({
         type: "reasoning",
-        text: result.thinking
+        // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): 截断超长思考,防 sidecar 内存堆积
+        text: clampReasoning(result.thinking)
       });
     }
     if (result.text) {
@@ -1130,7 +1186,8 @@ ${plan}
         type: "tool-call",
         toolCallId: tc.id,
         toolName: mappedName,
-        input: JSON.stringify(mappedInput),
+        // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): 截断超大入参字段
+        input: JSON.stringify(clampToolInput(mappedInput)),
         providerExecuted: executed
       });
     }
@@ -1288,6 +1345,7 @@ ${plan}
     const capturedModelId = this.modelId;
     const stream = new ReadableStream({
       start(controller) {
+        const guard = createFirehoseGuard();
         let activeProcess = getActiveProcess(sk);
         let proc;
         let lineEmitter;
@@ -1383,11 +1441,13 @@ ${plan}
               if (delta.type === "thinking_delta" && delta.thinking) {
                 const reasoningId = reasoningIds.get(idx);
                 if (reasoningId) {
-                  controller.enqueue({
-                    type: "reasoning-delta",
-                    id: reasoningId,
-                    delta: delta.thinking
-                  });
+                  const safe = guard.filterReasoning(delta.thinking);
+                  if (safe)
+                    controller.enqueue({
+                      type: "reasoning-delta",
+                      id: reasoningId,
+                      delta: safe
+                    });
                 }
               }
               if (delta.type === "text_delta" && delta.text) {
@@ -1493,7 +1553,8 @@ ${plan}
                       type: "tool-call",
                       toolCallId: tc.id,
                       toolName: mappedName,
-                      input: JSON.stringify(mappedInput),
+                      // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): 截断超大入参字段
+                      input: JSON.stringify(guard.clampToolInput(mappedInput)),
                       providerExecuted: executed
                     });
                   }
@@ -1523,20 +1584,23 @@ ${plan}
                   });
                 }
                 if (block.type === "thinking" && block.thinking) {
-                  const thinkingId = generateId();
-                  controller.enqueue({
-                    type: "reasoning-start",
-                    id: thinkingId
-                  });
-                  controller.enqueue({
-                    type: "reasoning-delta",
-                    id: thinkingId,
-                    delta: block.thinking
-                  });
-                  controller.enqueue({
-                    type: "reasoning-end",
-                    id: thinkingId
-                  });
+                  const safe = guard.filterReasoning(block.thinking);
+                  if (safe) {
+                    const thinkingId = generateId();
+                    controller.enqueue({
+                      type: "reasoning-start",
+                      id: thinkingId
+                    });
+                    controller.enqueue({
+                      type: "reasoning-delta",
+                      id: thinkingId,
+                      delta: safe
+                    });
+                    controller.enqueue({
+                      type: "reasoning-end",
+                      id: thinkingId
+                    });
+                  }
                 }
                 if (block.type === "tool_use" && block.id && block.name) {
                   const parsedInput = block.input ?? {};
@@ -1606,7 +1670,8 @@ ${plan}
                         type: "tool-call",
                         toolCallId: block.id,
                         toolName: mappedName,
-                        input: JSON.stringify(mappedInput),
+                        // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): 截断超大入参字段
+                        input: JSON.stringify(guard.clampToolInput(mappedInput)),
                         providerExecuted: executed
                       });
                     }
@@ -1643,7 +1708,8 @@ ${plan}
                       toolCallId: block.tool_use_id,
                       toolName: toolCall.name,
                       result: {
-                        output: resultText,
+                        // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): 截断超大工具结果(子任务输出大头)
+                        output: clampToolInput(resultText),
                         title: toolCall.name,
                         metadata: {}
                       },
