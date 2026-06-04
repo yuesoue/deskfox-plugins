@@ -24,6 +24,13 @@ import {
   sessionKey,
 } from "./session-manager.js"
 import { log } from "./logger.js"
+// FORK 2026-06-04 (firehose-cap): Layer① 截流 — 防 claude Workflow 海量事件撑爆 sidecar 内存
+// 详见 OPENCODE-PLAN/需求池/sidecar-OOM崩溃-四层防御加固.md (REQ-049 Layer①)
+import {
+  createFirehoseGuard,
+  clampReasoning,
+  clampToolInput,
+} from "./firehose-guard.js"
 
 // FORK 2026-04-29 ai-sdk@6 升级了 usage schema (asLanguageModelUsage 期望 nested object,
 // 见 ai/dist/index.js:2526). 旧 flat number 形式 { inputTokens: 0 } 会让 ai-sdk
@@ -458,7 +465,8 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     if (result.thinking) {
       content.push({
         type: "reasoning",
-        text: result.thinking,
+        // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): 截断超长思考,防 sidecar 内存堆积
+        text: clampReasoning(result.thinking),
       } as any)
     }
 
@@ -488,7 +496,8 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
         type: "tool-call",
         toolCallId: tc.id,
         toolName: mappedName,
-        input: JSON.stringify(mappedInput),
+        // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): 截断超大入参字段
+        input: JSON.stringify(clampToolInput(mappedInput)),
         providerExecuted: executed,
       } as any)
     }
@@ -680,6 +689,9 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
 
     const stream = new ReadableStream<LanguageModelV2StreamPart>({
       start(controller) {
+        // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): 本回合的截流 guard,
+        // 把 reasoning / tool 入参 / tool 结果有界化,防 sidecar 内存撑爆。
+        const guard = createFirehoseGuard()
         let activeProcess = getActiveProcess(sk)
         let proc: import("child_process").ChildProcess
         let lineEmitter: import("events").EventEmitter
@@ -821,11 +833,14 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
               if (delta.type === "thinking_delta" && delta.thinking) {
                 const reasoningId = reasoningIds.get(idx)
                 if (reasoningId) {
-                  controller.enqueue({
-                    type: "reasoning-delta",
-                    id: reasoningId,
-                    delta: delta.thinking,
-                  } as any)
+                  // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): reasoning 超上限后丢弃
+                  const safe = guard.filterReasoning(delta.thinking)
+                  if (safe)
+                    controller.enqueue({
+                      type: "reasoning-delta",
+                      id: reasoningId,
+                      delta: safe,
+                    } as any)
                 }
               }
 
@@ -949,7 +964,8 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
                       type: "tool-call",
                       toolCallId: tc.id,
                       toolName: mappedName,
-                      input: JSON.stringify(mappedInput),
+                      // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): 截断超大入参字段
+                      input: JSON.stringify(guard.clampToolInput(mappedInput)),
                       providerExecuted: executed,
                     } as any)
                   }
@@ -982,20 +998,24 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
                 }
 
                 if (block.type === "thinking" && block.thinking) {
-                  const thinkingId = generateId()
-                  controller.enqueue({
-                    type: "reasoning-start",
-                    id: thinkingId,
-                  } as any)
-                  controller.enqueue({
-                    type: "reasoning-delta",
-                    id: thinkingId,
-                    delta: block.thinking,
-                  } as any)
-                  controller.enqueue({
-                    type: "reasoning-end",
-                    id: thinkingId,
-                  } as any)
+                  // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): reasoning 超上限后丢弃
+                  const safe = guard.filterReasoning(block.thinking)
+                  if (safe) {
+                    const thinkingId = generateId()
+                    controller.enqueue({
+                      type: "reasoning-start",
+                      id: thinkingId,
+                    } as any)
+                    controller.enqueue({
+                      type: "reasoning-delta",
+                      id: thinkingId,
+                      delta: safe,
+                    } as any)
+                    controller.enqueue({
+                      type: "reasoning-end",
+                      id: thinkingId,
+                    } as any)
+                  }
                 }
 
                 if (block.type === "tool_use" && block.id && block.name) {
@@ -1074,7 +1094,8 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
                         type: "tool-call",
                         toolCallId: block.id,
                         toolName: mappedName,
-                        input: JSON.stringify(mappedInput),
+                        // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): 截断超大入参字段
+                        input: JSON.stringify(guard.clampToolInput(mappedInput)),
                         providerExecuted: executed,
                       } as any)
                     }
@@ -1122,7 +1143,8 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
                       toolCallId: block.tool_use_id,
                       toolName: toolCall.name,
                       result: {
-                        output: resultText,
+                        // FORK 2026-06-04 (firehose-cap REQ-049 Layer①): 截断超大工具结果(子任务输出大头)
+                        output: clampToolInput(resultText) as string,
                         title: toolCall.name,
                         metadata: {},
                       },
