@@ -54,6 +54,32 @@ test("disposeAll: SIGKILL 杀掉所有子进程并清空 session", async () => {
   expect(getClaudeSessionId("life-a")).toBeUndefined() // disposeAll 清空 claudeSessions
 })
 
+test(
+  "deleteActiveProcess: 子进程吞掉 SIGTERM 时 2s 后 SIGKILL 兜底",
+  async () => {
+    // 用 /bin/sh 的 `trap "" TERM` 忽略 SIGTERM(与 node/bun 运行时无关), 模拟"阻塞在
+    // stdin 不响应 SIGTERM"的 claude → 只有 SIGKILL 能杀。
+    const proc = spawn(
+      "/bin/sh",
+      ["-c", 'trap "" TERM; while :; do sleep 0.2; done'],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    )
+    setActiveProcess("life-kill", { proc, lineEmitter: new EventEmitter() })
+
+    const exitInfo = new Promise<{ code: number | null; signal: string | null }>(
+      (res) => proc.once("exit", (code, signal) => res({ code, signal })),
+    )
+    // 等 sh 执行到 trap 那行装好忽略 handler, 否则 SIGTERM 在 trap 生效前到达会直接杀掉
+    await new Promise((r) => setTimeout(r, 300))
+    deleteActiveProcess("life-kill") // SIGTERM 被吞 → SIGKILL_DELAY_MS(2s) 后 SIGKILL
+    const { signal } = await exitInfo
+
+    expect(signal).toBe("SIGKILL")
+    expect(getActiveProcess("life-kill")).toBeUndefined()
+  },
+  10000, // 兜底 2s + 余量
+)
+
 test("deleteActiveProcess 对不存在的 key 安全无副作用", () => {
   expect(() => deleteActiveProcess("nope")).not.toThrow()
 })
