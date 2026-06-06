@@ -380,3 +380,29 @@ doStream 流式 / B1 result-path 属集成行为,由真机实测覆盖,未做单
 
 结论:7 分钟 idle 计时是当前架构下回收孤儿进程的**唯一可行手段**, 维持现状。
 若将来要做精确删除同步, 按第 4 点的清单走, 但记住它只是"删除即时清理"的锦上添花, idle 仍是地基。
+
+### 11.8 Windows 退出/孤儿验证(2026-06-06,真机实测,结论:免 Job Object)
+`HANDOFF-windows.md` 第②点让 Windows 端验"宿主退出 / 被强杀时, 插件 spawn 的 claude 子进程
+是否变孤儿"。真机(本开发机, Win11 + DeskFox + 真 claude)实测两条路径**均无残留**:
+
+| 场景 | sidecar(opencode-cli) | 插件 claude(带 `--output-format stream-json`) | `exit` 钩子 |
+|---|---|---|---|
+| ① 托盘正常退出 | 退出 | ✅ 随之消失 | 触发(`process.on("exit", killAll)`) |
+| ② **`Stop-Process -Force` 强杀 sidecar**(等价 `TerminateProcess`) | 被强杀 | ✅ **仍随之消失, 无孤儿** | **没机会跑**, 照样无残留 |
+
+**关键机制(强杀也不留孤儿的真正原因, 不是 exit 钩子):** 插件 claude 是 `--input-format stream-json`,
+阻塞读取 sidecar 持有的 stdin 管道。sidecar 被 `TerminateProcess` 时 OS 关闭管道写入端 →
+claude stdin 收到 EOF → **claude 自行退出**。这条路径不依赖任何信号/钩子, 比 `exit` 钩子更鲁棒。
+→ 清理有**双保险**:优雅退出靠 `registerExitHandlers` 的 `killAll`;强杀靠 stdin EOF 自然死。
+
+附带观察:强杀 sidecar 后 DeskFox(GUI 主进程)会**自动重启一个新 sidecar**(新 opencode-cli, 父=DeskFox.exe),
+新 sidecar 下不挂任何 claude → 印证旧 claude 是真死透, 不是被新 sidecar 接管。
+
+**决定:不写 Windows Job Object。** 交接文件原判"这是唯一可能需要真正动代码的点"——实测排除,
+Windows 适配实际无"必须动代码"项(第①④点本就不动, 第③点仅为在 Windows 跑 `bun test` 时才改测试)。
+检测命令(复现用, 只抓插件 spawn 的 claude, 自动排除交互式 Claude Code CLI 会话):
+```powershell
+Get-CimInstance Win32_Process | Where-Object {
+  ($_.Name -eq 'claude.exe' -and $_.CommandLine -like '*stream-json*') -or $_.Name -eq 'opencode-cli.exe'
+} | Select-Object ProcessId, ParentProcessId, Name, CreationDate | Format-Table -Auto
+```

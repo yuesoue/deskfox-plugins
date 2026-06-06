@@ -47,6 +47,12 @@ Windows 上即便退出码和 Mac(`code:143`)不同也照样正确。**改这块
 
 ## 2. `process.on("SIGTERM")` 在 Windows 不触发 —— 必须确认退出兜底
 
+> **✅ 已验证(2026-06-06,真机)——结论:无孤儿,免 Job Object。** 两条路径均测,均无残留:
+> ①托盘正常退出 → claude 随之消失(`exit` 钩子触发);②`Stop-Process -Force` 强杀 sidecar
+> (等价 `TerminateProcess`,绕过 `exit` 钩子)→ claude **仍随之消失**。真正保命的不是 `exit`
+> 钩子,而是 **stdin 管道 EOF**:claude 阻塞读 sidecar 的 stdin,sidecar 一死管道写端关闭 →
+> claude 收 EOF 自退。详见 `NOTES.md` §11.8。**本点无需再适配。**
+
 文件:`src/session-manager.ts` `registerExitHandlers()`
 
 - `process.on("SIGTERM")` 在 Windows 上**永不触发**(Node 不支持),那段是死代码,但**无害**(注册不报错)。
@@ -110,8 +116,11 @@ opencode 加载方式:`opencode.jsonc` 的 `provider["claude-code"].npm = "file:
 ## 6. 一句话总结
 
 **运行时逻辑跨平台,dist 在 Windows 上照常工作。** 你真正要做的:
-1. **重点验第 2 点**——Windows 上关闭 DeskFox 后 claude 子进程是否被清(可能是唯一需要动代码的地方);
-2. 想跑测试就改第 3 点的 `lifecycle.test.ts`;
+1. ~~**重点验第 2 点**——Windows 上关闭 DeskFox 后 claude 子进程是否被清~~ —— **✅ 2026-06-06 真机已验,
+   优雅退出 + 强杀 sidecar 两种路径都无孤儿(stdin EOF 双保险),不写 Job Object。详见第 2 点顶部 / NOTES §11.8。**
+2. 想跑测试就改第 3 点的 `lifecycle.test.ts`(唯一还剩的可选改动,仅影响在 Windows 跑 `bun test`);
 3. 第 1、4 点了解即可,一般不用动。
+
+**净结论:Windows 适配已无"必须动代码"项;唯一可选项是想跑测试时改第 3 点。**
 
 有疑问回看 `NOTES.md` §11(实现 + 踩坑 + 架构决策全在那)。
