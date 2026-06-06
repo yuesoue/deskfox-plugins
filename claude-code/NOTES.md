@@ -349,3 +349,34 @@ doStream 流式 / B1 result-path 属集成行为,由真机实测覆盖,未做单
 
 **通用教训**:判断"resume 是否失败"的可靠信号是 **`usingResume && 从未收到 system init`**,
 而不是"进程怎么退出的"——因为 claude 失败有多种退出形态(静默 close / result{isError} / 非零 code)。
+
+### 11.7 为什么用 7 分钟 idle、而不是"会话结束信号"(已调研,决定不做 — 2026-06-06)
+
+有人(包括未来的我)会问:能不能不用 7 分钟 idle 计时,改成 DeskFox 通知插件"会话结束了"再精确回收?
+**结论:不能替代,已决定维持 7 分钟现状。** 调研依据(opencode-fork 代码):
+
+1. **provider 拿不到任何会话生命周期信号。** 我们是 AI-SDK provider, 运行时只有 `doStream(options)`。
+   这个 fork 往 `providerOptions._opencode` 只注入了 `{cwd, project}`(`llm.ts:375-378`)——
+   **连 sessionID 都没注入**。(顺带踩坑记录:本插件代码读 `_opencode.sessionID` 其实永远是
+   undefined, 一直在走 `fingerprintFromPrompt` 兜底, 用首条 user message 的哈希当会话指纹;
+   sessionKey 末尾那 12 位 hex 就是这指纹, 不是真 sessionID。功能能跑因为指纹在一会话内稳定。)
+
+2. **会话事件存在, 但在另一套系统里。** opencode 有独立的 **Plugin** 系统(配 `plugin:[...]`,
+   非 provider), `Hooks.event`(`packages/plugin/src/index.ts:75,223`)能收所有总线事件, 包括
+   `session.deleted`(`session/session.ts:324`)、`session.idle`/`session.status`(`session/status.ts:38`)。
+
+3. **根本性语义问题(关键):opencode 的会话是永久记录, "关闭" ≠ "结束/删除"。**
+   关掉对话窗口 / 不聊了, 会话仍存在(随时能 resume)。只有**显式删除**才 `session.deleted`。
+   所以:
+   - 用户显式删对话 → ✅ `session.deleted`(精确)
+   - 用户只是不聊了/关窗口 → ❌ **没有任何事件**(设计如此, 会话不死)← 这正是最常见场景
+   - 每轮结束 → `session.idle` 会发, 但那是"这轮完了"非"会话完了", 拿来回收=每轮都杀, 白费复用
+   → 对"不聊了"这个主场景 opencode **本质上给不出信号**, idle 计时是架构使然, 不是偷懒。
+
+4. **即便只想接 `session.deleted` 做精确补充, 也有前置 gap**:事件带的是真 sessionID, 而 provider
+   现在按 fingerprint 建键, 两边对不上。要落地需:fork 在 `_opencode` 补注入 sessionID + provider
+   改用 sessionID 建键 + 新增 opencode plugin 入口订阅事件 + `plugin:[]` 注册本包 —— 跨 fork+plugin
+   双改的正经功能, 且**替代不了 idle 兜底**(主场景仍无信号)。**投入产出不值, 决定不做。**
+
+结论:7 分钟 idle 计时是当前架构下回收孤儿进程的**唯一可行手段**, 维持现状。
+若将来要做精确删除同步, 按第 4 点的清单走, 但记住它只是"删除即时清理"的锦上添花, idle 仍是地基。
