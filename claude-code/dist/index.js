@@ -24,9 +24,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// node_modules/secure-json-parse/index.js
+// node_modules/.pnpm/secure-json-parse@2.7.0/node_modules/secure-json-parse/index.js
 var require_secure_json_parse = __commonJS({
-  "node_modules/secure-json-parse/index.js"(exports, module) {
+  "node_modules/.pnpm/secure-json-parse@2.7.0/node_modules/secure-json-parse/index.js"(exports, module) {
     "use strict";
     var hasBuffer = typeof Buffer !== "undefined";
     var suspectProtoRx = /"(?:_|\\u005[Ff])(?:_|\\u005[Ff])(?:p|\\u0070)(?:r|\\u0072)(?:o|\\u006[Ff])(?:t|\\u0074)(?:o|\\u006[Ff])(?:_|\\u005[Ff])(?:_|\\u005[Ff])"\s*:/;
@@ -131,7 +131,7 @@ var require_secure_json_parse = __commonJS({
 // src/claude-code-language-model.ts
 import { createHash } from "crypto";
 
-// node_modules/@ai-sdk/provider-utils/node_modules/@ai-sdk/provider/dist/index.mjs
+// node_modules/.pnpm/@ai-sdk+provider@1.1.3/node_modules/@ai-sdk/provider/dist/index.mjs
 var marker = "vercel.ai.error";
 var symbol = Symbol.for(marker);
 var _a;
@@ -249,7 +249,7 @@ var symbol14 = Symbol.for(marker14);
 var _a14;
 _a14 = symbol14;
 
-// node_modules/nanoid/non-secure/index.js
+// node_modules/.pnpm/nanoid@3.3.11/node_modules/nanoid/non-secure/index.js
 var customAlphabet = (alphabet, defaultSize = 21) => {
   return (size = defaultSize) => {
     let id = "";
@@ -261,7 +261,7 @@ var customAlphabet = (alphabet, defaultSize = 21) => {
   };
 };
 
-// node_modules/@ai-sdk/provider-utils/dist/index.mjs
+// node_modules/.pnpm/@ai-sdk+provider-utils@2.2.8_zod@3.25.76/node_modules/@ai-sdk/provider-utils/dist/index.mjs
 var import_secure_json_parse = __toESM(require_secure_json_parse(), 1);
 var createIdGenerator = ({
   prefix,
@@ -623,18 +623,89 @@ Now continuing with the current message:
 import { spawn } from "child_process";
 import { createInterface } from "readline";
 import { EventEmitter } from "events";
+var IDLE_TIMEOUT_MS = 7 * 60 * 1e3;
+var SIGKILL_DELAY_MS = 2e3;
 var activeProcesses = /* @__PURE__ */ new Map();
 var claudeSessions = /* @__PURE__ */ new Map();
 function getActiveProcess(key) {
-  return activeProcesses.get(key);
+  const ap = activeProcesses.get(key);
+  if (ap?.idleTimer) {
+    clearTimeout(ap.idleTimer);
+    ap.idleTimer = void 0;
+  }
+  return ap;
 }
 function deleteActiveProcess(key) {
   const ap = activeProcesses.get(key);
-  if (ap) {
-    ap.proc.kill();
-    activeProcesses.delete(key);
+  if (!ap) return;
+  if (ap.idleTimer) {
+    clearTimeout(ap.idleTimer);
+    ap.idleTimer = void 0;
+  }
+  activeProcesses.delete(key);
+  const proc = ap.proc;
+  try {
+    proc.kill("SIGTERM");
+  } catch {
+  }
+  if (proc.exitCode === null && proc.signalCode === null) {
+    const killTimer = setTimeout(() => {
+      if (proc.exitCode === null && proc.signalCode === null) {
+        log.warn("process did not exit after SIGTERM, sending SIGKILL", { key });
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+        }
+      }
+    }, SIGKILL_DELAY_MS);
+    killTimer.unref?.();
+    proc.once("exit", () => clearTimeout(killTimer));
   }
 }
+function resetIdleTimer(key) {
+  const ap = activeProcesses.get(key);
+  if (!ap) return;
+  if (ap.idleTimer) clearTimeout(ap.idleTimer);
+  ap.idleTimer = setTimeout(() => {
+    log.info("idle process timed out, recycling (keeping session for resume)", {
+      key
+    });
+    deleteActiveProcess(key);
+  }, IDLE_TIMEOUT_MS);
+  ap.idleTimer.unref?.();
+}
+function disposeAll() {
+  for (const [key, ap] of activeProcesses) {
+    if (ap.idleTimer) clearTimeout(ap.idleTimer);
+    try {
+      ap.proc.kill("SIGKILL");
+    } catch {
+    }
+    activeProcesses.delete(key);
+  }
+  claudeSessions.clear();
+}
+var exitHandlersRegistered = false;
+function registerExitHandlers() {
+  if (exitHandlersRegistered) return;
+  exitHandlersRegistered = true;
+  const killAll = () => {
+    for (const ap of activeProcesses.values()) {
+      try {
+        ap.proc.kill("SIGKILL");
+      } catch {
+      }
+    }
+  };
+  process.on("exit", killAll);
+  for (const sig of ["SIGTERM", "SIGINT"]) {
+    process.on(sig, () => {
+      killAll();
+      process.exit(0);
+    });
+  }
+}
+registerExitHandlers();
 function getClaudeSessionId(key) {
   return claudeSessions.get(key);
 }
@@ -700,7 +771,7 @@ function buildCliArgs(opts) {
   if (includeSessionId) {
     const sessionId = claudeSessions.get(sessionKey2);
     if (sessionId && !activeProcesses.has(sessionKey2)) {
-      args.push("--session-id", sessionId);
+      args.push("--resume", sessionId);
     }
   }
   if (skipPermissions) {
@@ -915,118 +986,126 @@ var ClaudeCodeLanguageModel = class {
     let thinkingText = "";
     let resultMeta = {};
     const toolCalls = [];
-    const result = await new Promise((resolve, reject) => {
-      rl.on("line", (line) => {
-        if (!line.trim()) return;
-        try {
-          const msg = JSON.parse(line);
-          if (msg.type === "system" && msg.subtype === "init") {
-            if (msg.session_id) {
-              setClaudeSessionId(sk, msg.session_id);
+    let result;
+    try {
+      result = await new Promise((resolve, reject) => {
+        rl.on("line", (line) => {
+          if (!line.trim()) return;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.type === "system" && msg.subtype === "init") {
+              if (msg.session_id) {
+                setClaudeSessionId(sk, msg.session_id);
+              }
             }
-          }
-          if (msg.type === "assistant" && msg.message?.content) {
-            for (const block of msg.message.content) {
-              if (block.type === "text" && block.text) {
-                responseText += block.text;
-              }
-              if (block.type === "thinking" && block.thinking) {
-                thinkingText += block.thinking;
-              }
-              if (block.type === "tool_use" && block.id && block.name) {
-                if (block.name === "AskUserQuestion" || block.name === "ask_user_question") {
-                  const parsedInput = block.input ?? {};
-                  const question = parsedInput?.question || "Question?";
-                  responseText += `
+            if (msg.type === "assistant" && msg.message?.content) {
+              for (const block of msg.message.content) {
+                if (block.type === "text" && block.text) {
+                  responseText += block.text;
+                }
+                if (block.type === "thinking" && block.thinking) {
+                  thinkingText += block.thinking;
+                }
+                if (block.type === "tool_use" && block.id && block.name) {
+                  if (block.name === "AskUserQuestion" || block.name === "ask_user_question") {
+                    const parsedInput = block.input ?? {};
+                    const question = parsedInput?.question || "Question?";
+                    responseText += `
 
 _Asking: ${question}_
 
 `;
-                  continue;
-                }
-                if (block.name === "ExitPlanMode") {
-                  const parsedInput = block.input ?? {};
-                  const plan = parsedInput?.plan || "";
-                  responseText += `
+                    continue;
+                  }
+                  if (block.name === "ExitPlanMode") {
+                    const parsedInput = block.input ?? {};
+                    const plan = parsedInput?.plan || "";
+                    responseText += `
 
 ${plan}
 
 ---
 **Do you want to proceed with this plan?** (yes/no)
 `;
-                  continue;
+                    continue;
+                  }
+                  toolCalls.push({
+                    id: block.id,
+                    name: block.name,
+                    args: block.input ?? {}
+                  });
                 }
+              }
+            }
+            if (msg.type === "content_block_start" && msg.content_block) {
+              if (msg.content_block.type === "tool_use" && msg.content_block.id && msg.content_block.name) {
                 toolCalls.push({
-                  id: block.id,
-                  name: block.name,
-                  args: block.input ?? {}
+                  id: msg.content_block.id,
+                  name: msg.content_block.name,
+                  args: {}
                 });
               }
             }
-          }
-          if (msg.type === "content_block_start" && msg.content_block) {
-            if (msg.content_block.type === "tool_use" && msg.content_block.id && msg.content_block.name) {
-              toolCalls.push({
-                id: msg.content_block.id,
-                name: msg.content_block.name,
-                args: {}
-              });
-            }
-          }
-          if (msg.type === "content_block_delta" && msg.delta) {
-            if (msg.delta.type === "text_delta" && msg.delta.text) {
-              responseText += msg.delta.text;
-            }
-            if (msg.delta.type === "thinking_delta" && msg.delta.thinking) {
-              thinkingText += msg.delta.thinking;
-            }
-            if (msg.delta.type === "input_json_delta" && msg.delta.partial_json && msg.index !== void 0) {
-              const tc = toolCalls[msg.index];
-              if (tc) {
-                try {
-                  tc.args = JSON.parse(msg.delta.partial_json);
-                } catch {
+            if (msg.type === "content_block_delta" && msg.delta) {
+              if (msg.delta.type === "text_delta" && msg.delta.text) {
+                responseText += msg.delta.text;
+              }
+              if (msg.delta.type === "thinking_delta" && msg.delta.thinking) {
+                thinkingText += msg.delta.thinking;
+              }
+              if (msg.delta.type === "input_json_delta" && msg.delta.partial_json && msg.index !== void 0) {
+                const tc = toolCalls[msg.index];
+                if (tc) {
+                  try {
+                    tc.args = JSON.parse(msg.delta.partial_json);
+                  } catch {
+                  }
                 }
               }
             }
-          }
-          if (msg.type === "result") {
-            if (msg.session_id) {
-              setClaudeSessionId(sk, msg.session_id);
+            if (msg.type === "result") {
+              if (msg.session_id) {
+                setClaudeSessionId(sk, msg.session_id);
+              }
+              resultMeta = {
+                sessionId: msg.session_id,
+                costUsd: msg.total_cost_usd,
+                durationMs: msg.duration_ms,
+                usage: msg.usage
+              };
+              resolve({
+                ...resultMeta,
+                text: responseText,
+                thinking: thinkingText,
+                toolCalls
+              });
             }
-            resultMeta = {
-              sessionId: msg.session_id,
-              costUsd: msg.total_cost_usd,
-              durationMs: msg.duration_ms,
-              usage: msg.usage
-            };
-            resolve({
-              ...resultMeta,
-              text: responseText,
-              thinking: thinkingText,
-              toolCalls
-            });
+          } catch {
           }
-        } catch {
-        }
-      });
-      rl.on("close", () => {
-        resolve({
-          ...resultMeta,
-          text: responseText,
-          thinking: thinkingText,
-          toolCalls
         });
+        rl.on("close", () => {
+          resolve({
+            ...resultMeta,
+            text: responseText,
+            thinking: thinkingText,
+            toolCalls
+          });
+        });
+        proc.on("error", (err) => {
+          log.error("process error", { error: err.message });
+          reject(err);
+        });
+        proc.stderr?.on("data", (data) => {
+          log.debug("stderr", { data: data.toString().slice(0, 200) });
+        });
+        proc.stdin?.write(userMsg + "\n");
       });
-      proc.on("error", (err) => {
-        log.error("process error", { error: err.message });
-        reject(err);
-      });
-      proc.stderr?.on("data", (data) => {
-        log.debug("stderr", { data: data.toString().slice(0, 200) });
-      });
-      proc.stdin?.write(userMsg + "\n");
-    });
+    } finally {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+      }
+    }
     const content = [];
     if (result.thinking) {
       content.push({
@@ -1215,6 +1294,7 @@ ${plan}
       model: this.modelId
     });
     const capturedModelId = this.modelId;
+    let onConsumerCancel;
     const stream = new ReadableStream({
       start(controller) {
         let activeProcess = getActiveProcess(sk);
@@ -1633,6 +1713,7 @@ ${plan}
                 controller.close();
               } catch {
               }
+              resetIdleTimer(sk);
             }
           } catch (e) {
             log.debug("failed to parse line", {
@@ -1674,29 +1755,36 @@ ${plan}
           } catch {
           }
         });
+        const teardown = (reason, closeController) => {
+          if (controllerClosed) return;
+          controllerClosed = true;
+          lineEmitter.off("line", lineHandler);
+          lineEmitter.off("close", closeHandler);
+          if (closeController) {
+            try {
+              controller.close();
+            } catch {
+            }
+          }
+          if (!turnCompleted) {
+            log.info(
+              "mid-turn teardown, killing claude process (keeping session for resume)",
+              { cwd, sk, reason }
+            );
+            deleteActiveProcess(sk);
+          }
+        };
+        onConsumerCancel = () => teardown("cancel", false);
         if (options.abortSignal) {
           options.abortSignal.addEventListener("abort", () => {
-            if (!turnCompleted) {
-              log.info(
-                "abort signal received mid-turn, keeping process alive",
-                { cwd }
-              );
-            }
-            if (!controllerClosed) {
-              controllerClosed = true;
-              lineEmitter.off("line", lineHandler);
-              lineEmitter.off("close", closeHandler);
-              try {
-                controller.close();
-              } catch {
-              }
-            }
+            teardown("abort", true);
           });
         }
         proc.stdin?.write(userMsg + "\n");
         log.debug("sent user message", { textLength: userMsg.length });
       },
       cancel() {
+        onConsumerCancel?.();
       }
     });
     return {
@@ -1708,7 +1796,7 @@ ${plan}
 };
 
 // src/index.ts
-var PLUGIN_VERSION = "0.1.3";
+var PLUGIN_VERSION = "0.1.4";
 function createClaudeCode(settings = {}) {
   const cliPath = settings.cliPath ?? process.env.CLAUDE_CLI_PATH ?? "claude";
   const cwd = settings.cwd ?? process.cwd();
@@ -1731,11 +1819,13 @@ function createClaudeCode(settings = {}) {
     return createModel(modelId);
   };
   provider.languageModel = createModel;
+  provider.dispose = disposeAll;
   return provider;
 }
 export {
   ClaudeCodeLanguageModel,
   PLUGIN_VERSION,
-  createClaudeCode
+  createClaudeCode,
+  disposeAll
 };
 //# sourceMappingURL=index.js.map

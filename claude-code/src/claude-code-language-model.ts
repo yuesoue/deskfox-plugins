@@ -19,6 +19,7 @@ import {
   getClaudeSessionId,
   deleteClaudeSessionId,
   deleteActiveProcess,
+  resetIdleTimer,
   sessionKey,
 } from "./session-manager.js"
 import { log } from "./logger.js"
@@ -302,13 +303,15 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     } = {}
     const toolCalls: Array<{ id: string; name: string; args: unknown }> = []
 
-    const result = await new Promise<
-      typeof resultMeta & {
-        text: string
-        thinking: string
-        toolCalls: typeof toolCalls
-      }
-    >((resolve, reject) => {
+    type DoGenerateResult = typeof resultMeta & {
+      text: string
+      thinking: string
+      toolCalls: typeof toolCalls
+    }
+    let result: DoGenerateResult
+    // FORK 2026-06-06 (加固) doGenerate 每次新 spawn 不入池, 用完(含异常分支)必杀, 防残留 idle 进程.
+    try {
+      result = await new Promise<DoGenerateResult>((resolve, reject) => {
       rl.on("line", (line) => {
         if (!line.trim()) return
         try {
@@ -441,7 +444,12 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
       })
 
       proc.stdin?.write(userMsg + "\n")
-    })
+      })
+    } finally {
+      try {
+        proc.kill("SIGTERM")
+      } catch {}
+    }
 
     const content: LanguageModelV2Content[] = []
 
@@ -664,6 +672,10 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
 
     // FORK 2026-04-29 capture 给 stream callback 用 (callback 内 `this` 不是 class 实例)
     const capturedModelId = this.modelId
+
+    // FORK 2026-06-06 (bug#1) consumer 取消 stream 时, cancel() 走与 abort 相同的清理.
+    // teardown 在 start() 内构造(需访问 proc/handlers), 这里抬出引用供 cancel() 调.
+    let onConsumerCancel: (() => void) | undefined
 
     const stream = new ReadableStream<LanguageModelV2StreamPart>({
       start(controller) {
@@ -1178,6 +1190,10 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
               try {
                 controller.close()
               } catch {}
+
+              // FORK 2026-06-06 (bug#2) 本轮正常完成, 进程留池供复用 → 启动 idle 回收定时器,
+              // IDLE_TIMEOUT_MS 内无新消息则回收(getActiveProcess 命中会取消它).
+              resetIdleTimer(sk)
             }
           } catch (e) {
             log.debug("failed to parse line", {
@@ -1222,23 +1238,41 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
           } catch {}
         })
 
-        // On abort, keep process alive for next message
+        // FORK 2026-06-06 (bug#1) 中途中断的统一清理: 移除监听 + 可选关闭 controller,
+        // 并对"未正常完成"的轮次真正杀掉子进程(否则中断了任务但 claude 仍在后台跑/占资源).
+        // 正常完成时 controllerClosed 已为 true → 提前 return, 进程留池供复用(不杀)。
+        //
+        // FORK 2026-06-06 (方案 B) 中途 kill 不再清 session id: claude 的转录是逐条落盘的,
+        // 被 SIGKILL 顶多丢"中断那一刻没 flush 完的半句", 之前已完成的轮次都在盘上。
+        // 下轮 buildCliArgs 用 --resume <id> 从磁盘续接, 拿到无损上下文。
+        // 万一 resume 这个被 kill 的 session 不干净, spawnClaudeProcess 的 stderr 兜底会
+        // 检测到错误并清掉 id, 自动退回"摘要重建"路径, 不会卡死。
+        const teardown = (reason: string, closeController: boolean) => {
+          if (controllerClosed) return
+          controllerClosed = true
+          lineEmitter.off("line", lineHandler)
+          lineEmitter.off("close", closeHandler)
+          if (closeController) {
+            try {
+              controller.close()
+            } catch {}
+          }
+          if (!turnCompleted) {
+            log.info(
+              "mid-turn teardown, killing claude process (keeping session for resume)",
+              { cwd, sk, reason },
+            )
+            deleteActiveProcess(sk)
+          }
+        }
+
+        // 供外层 cancel() 调用(consumer 取消 stream 时, controller 已在销毁, 不再 close)
+        onConsumerCancel = () => teardown("cancel", false)
+
+        // On abort: stop streaming and, if mid-turn, kill the process.
         if (options.abortSignal) {
           options.abortSignal.addEventListener("abort", () => {
-            if (!turnCompleted) {
-              log.info(
-                "abort signal received mid-turn, keeping process alive",
-                { cwd },
-              )
-            }
-            if (!controllerClosed) {
-              controllerClosed = true
-              lineEmitter.off("line", lineHandler)
-              lineEmitter.off("close", closeHandler)
-              try {
-                controller.close()
-              } catch {}
-            }
+            teardown("abort", true)
           })
         }
 
@@ -1247,7 +1281,8 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
         log.debug("sent user message", { textLength: userMsg.length })
       },
       cancel() {
-        // Consumer cancelled the stream
+        // FORK 2026-06-06 (bug#1) consumer 取消 stream → 同 abort 一样杀进程 + 清 session.
+        onConsumerCancel?.()
       },
     })
 

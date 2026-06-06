@@ -1,5 +1,6 @@
 import type { LanguageModelV2, ProviderV2 } from "@ai-sdk/provider"
 import { ClaudeCodeLanguageModel } from "./claude-code-language-model.js"
+import { disposeAll } from "./session-manager.js"
 import { log } from "./logger.js"
 import type { ClaudeCodeProviderSettings } from "./types.js"
 
@@ -10,6 +11,8 @@ export const PLUGIN_VERSION = process.env.PLUGIN_VERSION ?? "dev"
 export interface ClaudeCodeProvider extends ProviderV2 {
   (modelId: string): LanguageModelV2
   languageModel(modelId: string): LanguageModelV2
+  // FORK 2026-06-06 (兜底) 插件卸载时调, 杀掉所有活动 claude 子进程并清 session, 防孤儿残留.
+  dispose(): void
 }
 
 export function createClaudeCode(
@@ -41,11 +44,13 @@ export function createClaudeCode(
   } as ClaudeCodeProvider
 
   provider.languageModel = createModel
+  provider.dispose = disposeAll
 
   return provider
 }
 
 export { ClaudeCodeLanguageModel } from "./claude-code-language-model.js"
+export { disposeAll } from "./session-manager.js"
 export type {
   ClaudeCodeConfig,
   ClaudeCodeProviderSettings,

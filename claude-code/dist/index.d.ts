@@ -94,11 +94,17 @@ declare class ClaudeCodeLanguageModel implements LanguageModelV2 {
     doStream(options: Parameters<LanguageModelV2["doStream"]>[0]): Promise<Awaited<ReturnType<LanguageModelV2["doStream"]>>>;
 }
 
+/**
+ * FORK 2026-06-06 (兜底/dispose) 杀掉所有活动子进程并清空 session, 供插件卸载时调用.
+ */
+declare function disposeAll(): void;
+
 declare const PLUGIN_VERSION: string;
 interface ClaudeCodeProvider extends ProviderV2 {
     (modelId: string): LanguageModelV2;
     languageModel(modelId: string): LanguageModelV2;
+    dispose(): void;
 }
 declare function createClaudeCode(settings?: ClaudeCodeProviderSettings): ClaudeCodeProvider;
 
-export { type ClaudeCodeConfig, ClaudeCodeLanguageModel, type ClaudeCodeProvider, type ClaudeCodeProviderSettings, type ClaudeStreamMessage, PLUGIN_VERSION, createClaudeCode };
+export { type ClaudeCodeConfig, ClaudeCodeLanguageModel, type ClaudeCodeProvider, type ClaudeCodeProviderSettings, type ClaudeStreamMessage, PLUGIN_VERSION, createClaudeCode, disposeAll };
