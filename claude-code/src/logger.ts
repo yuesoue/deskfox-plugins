@@ -11,6 +11,14 @@ const LOG_FILE =
   process.env.OPENCODE_CLAUDE_CODE_LOG_FILE ??
   path.join(os.homedir(), ".config", "opencode", "claude-code-plugin.log")
 
+// Error log is always written regardless of DEBUG, so spawn failures
+// are captured even without setting DEBUG=opencode-claude-code.
+const ERROR_LOG_FILE = path.join(os.homedir(), ".config", "opencode", "claude-code-error.log")
+
+try {
+  mkdirSync(path.dirname(ERROR_LOG_FILE), { recursive: true })
+} catch {}
+
 if (DEBUG) {
   try {
     mkdirSync(path.dirname(LOG_FILE), { recursive: true })
@@ -40,12 +48,12 @@ export const log = {
   warn(msg: string, data?: Record<string, unknown>) {
     write(fmt("WARN", msg, data))
   },
-  // error 在关 DEBUG 时也走 stderr — sidecar stderr 可能被 DeskFox 主进程捕获到日志.
-  // 这是 plugin 唯一一类"无论如何也要留痕"的 log level.
+  // error 无论 DEBUG 开关: 同时写 stderr + claude-code-error.log, 确保 spawn 失败可复现.
   error(msg: string, data?: Record<string, unknown>) {
     const line = fmt("ERROR", msg, data)
     if (DEBUG) write(line)
-    else console.error(line)
+    console.error(line)
+    try { appendFileSync(ERROR_LOG_FILE, line + "\n") } catch {}
   },
   debug(msg: string, data?: Record<string, unknown>) {
     write(fmt("DEBUG", msg, data))
