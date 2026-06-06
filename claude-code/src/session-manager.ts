@@ -9,6 +9,9 @@ export interface ActiveProcess {
   lineEmitter: EventEmitter
   // FORK 2026-06-06 (bug#2) idle 回收: 每轮 turn 完成后启动, 超时未来新消息则回收进程, 复用命中时清掉.
   idleTimer?: ReturnType<typeof setTimeout>
+  // FORK 2026-06-06 (方案B 修复) 标记"我们主动杀的": 停止/idle/dispose 杀进程时, claude 可能以
+  // 非零码退出, 但这不是错误, 不该清 session id(否则下轮拿不到 id 就 resume 不了)。
+  killedIntentionally?: boolean
 }
 
 // 空闲多久后回收子进程(补"插件收不到 opencode session-close 事件"缺口的唯一插件侧手段).
@@ -47,6 +50,8 @@ export function deleteActiveProcess(key: string): void {
   activeProcesses.delete(key)
 
   const proc = ap.proc
+  // FORK 2026-06-06 (方案B 修复) 标记主动杀, 让 exit handler 不把它当错误退出清掉 session id。
+  ap.killedIntentionally = true
   // FORK 2026-06-06 (加固) 先 SIGTERM, 阻塞在 stdin 的 CLI 一般会响应;
   // 若 SIGKILL_DELAY_MS 后仍未退出再强杀兜底.
   try {
@@ -93,6 +98,7 @@ export function resetIdleTimer(key: string): void {
 export function disposeAll(): void {
   for (const [key, ap] of activeProcesses) {
     if (ap.idleTimer) clearTimeout(ap.idleTimer)
+    ap.killedIntentionally = true
     try {
       ap.proc.kill("SIGKILL")
     } catch {}
@@ -263,9 +269,16 @@ export function spawnClaudeProcess(
   activeProcesses.set(sessionKey, ap)
 
   proc.on("exit", (code, signal) => {
-    log.info("claude process exited", { code, signal, sessionKey })
+    log.info("claude process exited", {
+      code,
+      signal,
+      sessionKey,
+      killedIntentionally: ap.killedIntentionally ?? false,
+    })
     activeProcesses.delete(sessionKey)
-    if (code !== 0 && code !== null) {
+    // FORK 2026-06-06 (方案B 修复) 只有"claude 自己非零崩溃"才清 session id;
+    // 我们主动杀(停止/idle/dispose)即便 claude 以非零码退出也保留 id, 供下轮 --resume。
+    if (code !== 0 && code !== null && !ap.killedIntentionally) {
       log.info("process exited with error, clearing session", {
         code,
         sessionKey,

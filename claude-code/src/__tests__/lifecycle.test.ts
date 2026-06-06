@@ -6,6 +6,7 @@ import {
   getActiveProcess,
   deleteActiveProcess,
   disposeAll,
+  spawnClaudeProcess,
   setClaudeSessionId,
   getClaudeSessionId,
 } from "../session-manager"
@@ -79,6 +80,44 @@ test(
   },
   10000, // 兜底 2s + 余量
 )
+
+test(
+  "方案B修复: 主动杀导致 claude 非零退出时仍保留 session id(供 --resume)",
+  async () => {
+    // 用 sh 捕获 SIGTERM 并以 exit 1 退出, 模拟"claude 收到我们的 SIGTERM 后非零退出"
+    const ap = spawnClaudeProcess(
+      "/bin/sh",
+      ["-c", 'trap "exit 1" TERM; while :; do sleep 0.2; done'],
+      process.cwd(),
+      "keep-sid",
+    )
+    setClaudeSessionId("keep-sid", "sid-keep")
+    const exited = new Promise<number | null>((res) =>
+      ap.proc.once("exit", (code) => res(code)),
+    )
+    await new Promise((r) => setTimeout(r, 300)) // 等 trap 装好
+    deleteActiveProcess("keep-sid") // 主动杀 → SIGTERM → trap → exit 1
+    const code = await exited
+
+    expect(code).toBe(1) // 确认是非零退出(正是会误清的情形)
+    // 关键: 主动杀的非零退出不该清 session id
+    expect(getClaudeSessionId("keep-sid")).toBe("sid-keep")
+  },
+  10000,
+)
+
+test("对照: claude 自己非零崩溃(非主动杀)→ 清掉 session id", async () => {
+  const ap = spawnClaudeProcess(
+    "/bin/sh",
+    ["-c", "exit 7"],
+    process.cwd(),
+    "crash-sid",
+  )
+  setClaudeSessionId("crash-sid", "sid-crash")
+  await new Promise<void>((res) => ap.proc.once("exit", () => res()))
+  // 非主动杀的非零退出 = 真错误, 应清掉
+  expect(getClaudeSessionId("crash-sid")).toBeUndefined()
+})
 
 test("deleteActiveProcess 对不存在的 key 安全无副作用", () => {
   expect(() => deleteActiveProcess("nope")).not.toThrow()

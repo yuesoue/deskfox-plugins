@@ -654,6 +654,7 @@ function deleteActiveProcess(key) {
   }
   activeProcesses.delete(key);
   const proc = ap.proc;
+  ap.killedIntentionally = true;
   try {
     proc.kill("SIGTERM");
   } catch {
@@ -687,6 +688,7 @@ function resetIdleTimer(key) {
 function disposeAll() {
   for (const [key, ap] of activeProcesses) {
     if (ap.idleTimer) clearTimeout(ap.idleTimer);
+    ap.killedIntentionally = true;
     try {
       ap.proc.kill("SIGKILL");
     } catch {
@@ -813,9 +815,14 @@ function spawnClaudeProcess(cliPath, cliArgs, cwd, sessionKey2) {
   const ap = { proc, lineEmitter };
   activeProcesses.set(sessionKey2, ap);
   proc.on("exit", (code, signal) => {
-    log.info("claude process exited", { code, signal, sessionKey: sessionKey2 });
+    log.info("claude process exited", {
+      code,
+      signal,
+      sessionKey: sessionKey2,
+      killedIntentionally: ap.killedIntentionally ?? false
+    });
     activeProcesses.delete(sessionKey2);
-    if (code !== 0 && code !== null) {
+    if (code !== 0 && code !== null && !ap.killedIntentionally) {
       log.info("process exited with error, clearing session", {
         code,
         sessionKey: sessionKey2
@@ -1989,7 +1996,7 @@ ${plan}
 };
 
 // src/index.ts
-var PLUGIN_VERSION = "0.1.7";
+var PLUGIN_VERSION = "0.1.8";
 function createClaudeCode(settings = {}) {
   const cliPath = settings.cliPath ?? process.env.CLAUDE_CLI_PATH ?? "claude";
   const cwd = settings.cwd ?? process.cwd();
