@@ -323,7 +323,29 @@ v0.1.3 加了三处版本号埋点,以后诊断不用再问:
 - **C4**:方案 B 后 idle 不再清 session id → `claudeSessions` 只增不减,故 `setClaudeSessionId`
   加了 `MAX_TRACKED_SESSIONS=200` 的 LRU 淘汰。
 
-### 11.5 待实测(动 B 前的唯一不确定点)
-`claude --resume <id> --input-format stream-json` 组合、以及"被 SIGKILL 的 session 能否干净 resume"
-需真机验证。失败路径已有 B1 兜底(退回 fresh+摘要),但 happy path 是否真无损要测。
-单测见 `src/__tests__/session-manager.test.ts`(`bun test`);进程/timer 类副作用未做单测。
+### 11.5 已实测(v0.1.9,真机 DeskFox + 真 claude 2.1.x)
+T1~T8 全过:中断真杀、中途 kill 后 `--resume` 续接(进程+语义)、idle 回收后续接、长任务不被
+误杀、多次中断无堆积、退出兜底。`claude --resume <id> --input-format stream-json` 组合可用,
+被 SIGTERM/SIGKILL 的 session 能干净 resume。单测见 `src/__tests__/`(`bun test`,需本机有 bun);
+doStream 流式 / B1 result-path 属集成行为,由真机实测覆盖,未做单测。
+
+### 11.6 ⚠️ 真 claude 的退出/失败行为(踩坑实录,改这块前必读)
+方案 B / B1 上线时栽了两个坑,**都因为"假进程/单测的行为和真 claude 不一样",只有真机暴露**。
+后人动 §11.3/§11.4 的回收、exit handler、B1 逻辑前,务必记住这两条 claude 实测行为:
+
+1. **claude 被 SIGTERM 杀时,以退出码 143 退出(`code:143, signal:null`),不是 `signal:"SIGTERM"`。**
+   → 老 exit handler 的 `if (code !== 0 && code !== null) 清 session` 会把**我们主动杀**的进程当
+   错误退出,清掉 session id → 方案 B 的 `--resume` 整个失效(实测:点停止后下轮变 fresh 无 resume)。
+   修法:`ActiveProcess.killedIntentionally` 标记,`deleteActiveProcess`/`disposeAll` 主动杀前置位,
+   exit handler 仅在 `!killedIntentionally` 时才清。**别假设"信号杀=code null"。**(v0.1.8)
+
+2. **claude 对失败的 `--resume`(转录不存在)不是静默退出,而是先发一条 `result{is_error:true}`
+   再以 `code:1` 退出**,stderr 同时有 `No conversation found with session ID: <id>`。
+   → B1 最初只在 closeHandler(静默关闭)里检测重试,但 `result` 处理器一看到 result 就
+   `turnCompleted=true` 关流,B1 永远跑不到 → 这条消息被赔成空回复,要用户重发才靠摘要自愈。
+   修法:`tryResumeRetry()`(判据=用了 resume 且从未收到 `system init` 且没重试过)在 **result 处理器
+   顶部** 和 closeHandler 两处都调;配 spawnClaudeProcess exit handler 的**身份守卫**
+   (`activeProcesses.get(key) === ap` 才 delete),防 B1 重起的同 key 新进程被老进程退出误删。(v0.1.9)
+
+**通用教训**:判断"resume 是否失败"的可靠信号是 **`usingResume && 从未收到 system init`**,
+而不是"进程怎么退出的"——因为 claude 失败有多种退出形态(静默 close / result{isError} / 非零 code)。
