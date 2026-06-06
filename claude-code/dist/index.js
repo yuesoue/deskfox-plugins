@@ -821,7 +821,9 @@ function spawnClaudeProcess(cliPath, cliArgs, cwd, sessionKey2) {
       sessionKey: sessionKey2,
       killedIntentionally: ap.killedIntentionally ?? false
     });
-    activeProcesses.delete(sessionKey2);
+    if (activeProcesses.get(sessionKey2) === ap) {
+      activeProcesses.delete(sessionKey2);
+    }
     if (code !== 0 && code !== null && !ap.killedIntentionally) {
       log.info("process exited with error, clearing session", {
         code,
@@ -1831,6 +1833,7 @@ ${plan}
               }
             }
             if (msg.type === "result") {
+              if (tryResumeRetry()) return;
               if (msg.session_id) {
                 setClaudeSessionId(sk, msg.session_id);
               }
@@ -1884,24 +1887,26 @@ ${plan}
             });
           }
         };
+        const tryResumeRetry = () => {
+          if (!(usingResume && !sawInit && !resumeRetried)) return false;
+          resumeRetried = true;
+          log.warn(
+            "--resume failed (no init), retrying fresh with history summary",
+            { sk }
+          );
+          lineEmitter.off("line", lineHandler);
+          lineEmitter.off("close", closeHandler);
+          deleteClaudeSessionId(sk);
+          deleteActiveProcess(sk);
+          usingResume = false;
+          currentUserMsg = getClaudeUserMessage(options.prompt, true);
+          relaunchFresh();
+          return true;
+        };
         const closeHandler = () => {
           log.debug("readline closed");
           if (controllerClosed) return;
-          if (usingResume && !sawInit && !resumeRetried && !turnCompleted) {
-            resumeRetried = true;
-            log.warn(
-              "--resume produced no init (stale/killed session?), retrying fresh with history summary",
-              { sk }
-            );
-            lineEmitter.off("line", lineHandler);
-            lineEmitter.off("close", closeHandler);
-            deleteClaudeSessionId(sk);
-            deleteActiveProcess(sk);
-            usingResume = false;
-            currentUserMsg = getClaudeUserMessage(options.prompt, true);
-            relaunchFresh();
-            return;
-          }
+          if (tryResumeRetry()) return;
           controllerClosed = true;
           lineEmitter.off("line", lineHandler);
           lineEmitter.off("close", closeHandler);
@@ -1996,7 +2001,7 @@ ${plan}
 };
 
 // src/index.ts
-var PLUGIN_VERSION = "0.1.8";
+var PLUGIN_VERSION = "0.1.9";
 function createClaudeCode(settings = {}) {
   const cliPath = settings.cliPath ?? process.env.CLAUDE_CLI_PATH ?? "claude";
   const cwd = settings.cwd ?? process.cwd();

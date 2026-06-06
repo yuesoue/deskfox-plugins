@@ -275,7 +275,11 @@ export function spawnClaudeProcess(
       sessionKey,
       killedIntentionally: ap.killedIntentionally ?? false,
     })
-    activeProcesses.delete(sessionKey)
+    // FORK 2026-06-06 (B1 修复) 身份守卫: 只在池里仍是"本进程"时才删, 否则会误删
+    // B1 重试时替换上来的新进程(同一 sessionKey)。
+    if (activeProcesses.get(sessionKey) === ap) {
+      activeProcesses.delete(sessionKey)
+    }
     // FORK 2026-06-06 (方案B 修复) 只有"claude 自己非零崩溃"才清 session id;
     // 我们主动杀(停止/idle/dispose)即便 claude 以非零码退出也保留 id, 供下轮 --resume。
     if (code !== 0 && code !== null && !ap.killedIntentionally) {

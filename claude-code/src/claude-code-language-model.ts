@@ -1187,6 +1187,11 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
 
             // result - end of conversation turn
             if (msg.type === "result") {
+              // FORK 2026-06-06 (B1 修复) claude 对失败的 --resume 不静默退出, 而是发一条
+              // result{isError:true}。若本次用了 resume 且从未 init, 这条 result 就是 resume
+              // 失败信号 → 转 fresh 重试, 别把它当正常完成(否则这条消息被赔成空回复)。
+              if (tryResumeRetry()) return
+
               if (msg.session_id) {
                 setClaudeSessionId(sk, msg.session_id)
               }
@@ -1251,28 +1256,34 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
           }
         }
 
+        // FORK 2026-06-06 (B1 修复) resume 失败的透明重试, 统一两处入口:
+        //   1) result 处理器: claude 对失败的 --resume 会发一条 result{isError:true} 而非静默退出
+        //   2) closeHandler: resume 进程没吐 init 就 readline close(静默退出)
+        // 判据 = 用了 --resume 且从未收到 init 且没重试过。命中则: 清 id、用历史摘要重建消息、
+        // 重 spawn 一个全新会话, 用户无感, 不丢这条消息。
+        const tryResumeRetry = (): boolean => {
+          if (!(usingResume && !sawInit && !resumeRetried)) return false
+          resumeRetried = true
+          log.warn(
+            "--resume failed (no init), retrying fresh with history summary",
+            { sk },
+          )
+          lineEmitter.off("line", lineHandler)
+          lineEmitter.off("close", closeHandler)
+          deleteClaudeSessionId(sk)
+          deleteActiveProcess(sk)
+          usingResume = false
+          currentUserMsg = getClaudeUserMessage(options.prompt, true)
+          relaunchFresh()
+          return true
+        }
+
         const closeHandler = () => {
           log.debug("readline closed")
           if (controllerClosed) return
 
-          // FORK 2026-06-06 (B1) resume 进程没建立会话就退出 → 透明重试一次 fresh。
-          // 条件: 用了 --resume、从未收到 init、还没重试过、本轮也没正常完成、且 stream 没被中断。
-          if (usingResume && !sawInit && !resumeRetried && !turnCompleted) {
-            resumeRetried = true
-            log.warn(
-              "--resume produced no init (stale/killed session?), retrying fresh with history summary",
-              { sk },
-            )
-            lineEmitter.off("line", lineHandler)
-            lineEmitter.off("close", closeHandler)
-            deleteClaudeSessionId(sk)
-            deleteActiveProcess(sk)
-            usingResume = false
-            // 重建消息: 这次带上压缩历史摘要(fresh 会话没有 claude 侧记忆)
-            currentUserMsg = getClaudeUserMessage(options.prompt, true)
-            relaunchFresh()
-            return
-          }
+          // resume 进程没 init 就静默关闭 → 转 fresh 重试
+          if (tryResumeRetry()) return
 
           controllerClosed = true
           lineEmitter.off("line", lineHandler)
