@@ -287,3 +287,43 @@ v0.1.3 加了三处版本号埋点,以后诊断不用再问:
 未来 bump version 时:
 - `package.json#version` 改一处,zip 名 / dist log / install 输出**全部自动跟随**
 - 不必去 install 脚本手动改
+
+## 11. 子进程生命周期:中断、回收、续接(v0.1.6)
+
+背景:plugin 把 `claude --output-format stream-json --input-format stream-json` 包成长驻子进程,
+按 `sessionKey`(cwd::model::scope::opencodeSessionId)在 `session-manager.ts` 的 `activeProcesses`
+里复用跑多轮。早期两个缺陷:点"停止"不杀进程(只 `controller.close()`);跑完/会话关闭后进程永不回收
+(无 idle timer、收不到 opencode session-close 事件)→ 孤儿 idle 进程(阻塞在 stdin)持续堆积。
+
+### 11.1 中断真杀(`claude-code-language-model.ts` `doStream`)
+- abort 与 cancel 走同一个 `teardown()`:移监听 + 可选关 controller,对**未正常完成**(`!turnCompleted`)
+  的轮次 `deleteActiveProcess(sk)` 真杀进程。正常完成时 `controllerClosed` 已 true → 提前 return,
+  进程留池供复用(不杀)。
+- `cancel()` 不再为空,经抬到外层的 `onConsumerCancel` 触发同一 `teardown`。
+
+### 11.2 idle 回收(`session-manager.ts` `resetIdleTimer`)
+- 每轮 turn 完成(收到 `result`)后起 `setTimeout(IDLE_TIMEOUT_MS=7min)`;`getActiveProcess` 复用命中即清掉。
+- 超时 → `deleteActiveProcess`(杀进程),**保留 session id**(见 §11.4)。
+- 计时从 result 起算,量的是"两轮之间的沉默",**不是任务执行时长** → 长任务(50min)不会被误杀。
+
+### 11.3 进程兜底(`session-manager.ts`)
+- `deleteActiveProcess`:先 `SIGTERM`,`SIGKILL_DELAY_MS=2s` 未退再 `SIGKILL`。
+- 模块级 `process.on("exit")` 同步杀全部;`SIGTERM`/`SIGINT` 只补杀子进程,**仅当我们是该信号唯一监听者**
+  才重发信号终止(B2,避免抢跑 opencode 的优雅关闭)。
+- `disposeAll()` / `provider.dispose()` 是**预留接口**:opencode 当前无插件 unload 钩子调它,
+  真正兜底靠上面的 exit/signal handler。
+
+### 11.4 无损续接 = 方案 B(`buildCliArgs` 用 `--resume`)
+- claude 的会话转录由 CLI 自己逐条落盘(`~/.claude/projects/<hash>/<session-id>.jsonl`),
+  与进程死活无关。所以回收/中途 kill **都保留 session id**,下轮 `buildCliArgs` 用 `--resume <id>`
+  从磁盘**无损**续接(取代旧的 `--session-id`,后者对已存在 id 会撞 "already in use")。
+- **B1 透明重试**:若 `--resume` 的进程没吐 `system init` 就退出(续接被 kill / 损坏的 session),
+  `closeHandler` 自动清 id、用历史摘要重建消息、重 spawn 一个 fresh 会话 → 用户无感,不丢这条消息。
+  (摘要重建是有损兜底,见 `message-builder.ts compactConversationHistory`)。
+- **C4**:方案 B 后 idle 不再清 session id → `claudeSessions` 只增不减,故 `setClaudeSessionId`
+  加了 `MAX_TRACKED_SESSIONS=200` 的 LRU 淘汰。
+
+### 11.5 待实测(动 B 前的唯一不确定点)
+`claude --resume <id> --input-format stream-json` 组合、以及"被 SIGKILL 的 session 能否干净 resume"
+需真机验证。失败路径已有 B1 兜底(退回 fresh+摘要),但 happy path 是否真无损要测。
+单测见 `src/__tests__/session-manager.test.ts`(`bun test`);进程/timer 类副作用未做单测。

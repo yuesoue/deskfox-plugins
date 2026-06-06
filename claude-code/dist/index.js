@@ -711,7 +711,14 @@ function registerExitHandlers() {
   for (const sig of ["SIGTERM", "SIGINT"]) {
     process.on(sig, () => {
       killAll();
-      process.exit(0);
+      if (process.listenerCount(sig) <= 1) {
+        process.removeAllListeners(sig);
+        try {
+          process.kill(process.pid, sig);
+        } catch {
+          process.exit(0);
+        }
+      }
     });
   }
 }
@@ -719,8 +726,14 @@ registerExitHandlers();
 function getClaudeSessionId(key) {
   return claudeSessions.get(key);
 }
+var MAX_TRACKED_SESSIONS = 200;
 function setClaudeSessionId(key, sessionId) {
+  if (claudeSessions.has(key)) claudeSessions.delete(key);
   claudeSessions.set(key, sessionId);
+  if (claudeSessions.size > MAX_TRACKED_SESSIONS) {
+    const oldest = claudeSessions.keys().next().value;
+    if (oldest !== void 0) claudeSessions.delete(oldest);
+  }
 }
 function deleteClaudeSessionId(key) {
   claudeSessions.delete(key);
@@ -1454,6 +1467,10 @@ ${plan}
         const toolCallMap = /* @__PURE__ */ new Map();
         const toolCallsById = /* @__PURE__ */ new Map();
         let resultMeta = {};
+        let usingResume = hasExistingSession && !hasActiveProcess;
+        let sawInit = false;
+        let resumeRetried = false;
+        let currentUserMsg = userMsg;
         const lineHandler = (line) => {
           if (!line.trim()) return;
           if (controllerClosed) return;
@@ -1464,10 +1481,12 @@ ${plan}
               subtype: msg.subtype
             });
             if (msg.type === "system" && msg.subtype === "init") {
+              sawInit = true;
               if (msg.session_id) {
                 setClaudeSessionId(sk, msg.session_id);
                 log.info("session initialized", {
-                  claudeSessionId: msg.session_id
+                  claudeSessionId: msg.session_id,
+                  viaResume: usingResume
                 });
               }
             }
@@ -1861,6 +1880,21 @@ ${plan}
         const closeHandler = () => {
           log.debug("readline closed");
           if (controllerClosed) return;
+          if (usingResume && !sawInit && !resumeRetried && !turnCompleted) {
+            resumeRetried = true;
+            log.warn(
+              "--resume produced no init (stale/killed session?), retrying fresh with history summary",
+              { sk }
+            );
+            lineEmitter.off("line", lineHandler);
+            lineEmitter.off("close", closeHandler);
+            deleteClaudeSessionId(sk);
+            deleteActiveProcess(sk);
+            usingResume = false;
+            currentUserMsg = getClaudeUserMessage(options.prompt, true);
+            relaunchFresh();
+            return;
+          }
           controllerClosed = true;
           lineEmitter.off("line", lineHandler);
           lineEmitter.off("close", closeHandler);
@@ -1880,9 +1914,7 @@ ${plan}
           } catch {
           }
         };
-        lineEmitter.on("line", lineHandler);
-        lineEmitter.on("close", closeHandler);
-        proc.on("error", (err) => {
+        const procErrorHandler = (err) => {
           log.error("process error (doStream)", {
             error: err.message,
             code: err.code,
@@ -1896,7 +1928,26 @@ ${plan}
             controller.close();
           } catch {
           }
-        });
+        };
+        const attachHandlers = () => {
+          lineEmitter.on("line", lineHandler);
+          lineEmitter.on("close", closeHandler);
+          proc.on("error", procErrorHandler);
+        };
+        const relaunchFresh = () => {
+          const freshArgs = buildCliArgs({
+            sessionKey: sk,
+            skipPermissions,
+            model: capturedModelId
+          });
+          const ap = spawnClaudeProcess(cliPath, freshArgs, cwd, sk);
+          proc = ap.proc;
+          lineEmitter = ap.lineEmitter;
+          attachHandlers();
+          proc.stdin?.write(currentUserMsg + "\n");
+          log.info("relaunched fresh after resume failure", { sk });
+        };
+        attachHandlers();
         const teardown = (reason, closeController) => {
           if (controllerClosed) return;
           controllerClosed = true;
@@ -1922,8 +1973,8 @@ ${plan}
             teardown("abort", true);
           });
         }
-        proc.stdin?.write(userMsg + "\n");
-        log.debug("sent user message", { textLength: userMsg.length });
+        proc.stdin?.write(currentUserMsg + "\n");
+        log.debug("sent user message", { textLength: currentUserMsg.length });
       },
       cancel() {
         onConsumerCancel?.();
@@ -1938,7 +1989,7 @@ ${plan}
 };
 
 // src/index.ts
-var PLUGIN_VERSION = "0.1.6";
+var PLUGIN_VERSION = "0.1.7";
 function createClaudeCode(settings = {}) {
   const cliPath = settings.cliPath ?? process.env.CLAUDE_CLI_PATH ?? "claude";
   const cwd = settings.cwd ?? process.cwd();

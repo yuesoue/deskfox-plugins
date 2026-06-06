@@ -1,6 +1,6 @@
 {
   "name": "opencode-claude-code-plugin",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Claude Code CLI provider plugin for opencode",
   "type": "module",
   "main": "dist/index.js",
@@ -18,7 +18,8 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "@ai-sdk/provider": "^2.0.0",

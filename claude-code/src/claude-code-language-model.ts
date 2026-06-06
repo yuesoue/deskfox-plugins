@@ -753,6 +753,15 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
           usage?: ClaudeStreamMessage["usage"]
         } = {}
 
+        // FORK 2026-06-06 (B1) resume 失败透明重试:
+        // 本次是否用 --resume 起的(有存量 session id 且无活进程时 buildCliArgs 会加 --resume)。
+        // 若 resume 的进程没吐出 system init 就退出(典型: 续接一个被 kill / 损坏的 session),
+        // 自动清掉 id、用历史摘要重建消息、重 spawn 一个全新会话, 用户无感, 不丢这条消息。
+        let usingResume = hasExistingSession && !hasActiveProcess
+        let sawInit = false
+        let resumeRetried = false
+        let currentUserMsg = userMsg
+
         const lineHandler = (line: string) => {
           if (!line.trim()) return
           if (controllerClosed) return
@@ -767,10 +776,14 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
 
             // Handle system init
             if (msg.type === "system" && msg.subtype === "init") {
+              // FORK 2026-06-06 (B1) 收到 init = 进程活着且会话已建立(resume 成功或 fresh 成功),
+              // 标记之, 让 closeHandler 不再误触发 resume 重试。
+              sawInit = true
               if (msg.session_id) {
                 setClaudeSessionId(sk, msg.session_id)
                 log.info("session initialized", {
                   claudeSessionId: msg.session_id,
+                  viaResume: usingResume,
                 })
               }
             }
@@ -1241,6 +1254,26 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
         const closeHandler = () => {
           log.debug("readline closed")
           if (controllerClosed) return
+
+          // FORK 2026-06-06 (B1) resume 进程没建立会话就退出 → 透明重试一次 fresh。
+          // 条件: 用了 --resume、从未收到 init、还没重试过、本轮也没正常完成、且 stream 没被中断。
+          if (usingResume && !sawInit && !resumeRetried && !turnCompleted) {
+            resumeRetried = true
+            log.warn(
+              "--resume produced no init (stale/killed session?), retrying fresh with history summary",
+              { sk },
+            )
+            lineEmitter.off("line", lineHandler)
+            lineEmitter.off("close", closeHandler)
+            deleteClaudeSessionId(sk)
+            deleteActiveProcess(sk)
+            usingResume = false
+            // 重建消息: 这次带上压缩历史摘要(fresh 会话没有 claude 侧记忆)
+            currentUserMsg = getClaudeUserMessage(options.prompt, true)
+            relaunchFresh()
+            return
+          }
+
           controllerClosed = true
           lineEmitter.off("line", lineHandler)
           lineEmitter.off("close", closeHandler)
@@ -1260,10 +1293,7 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
           } catch {}
         }
 
-        lineEmitter.on("line", lineHandler)
-        lineEmitter.on("close", closeHandler)
-
-        proc.on("error", (err: Error) => {
+        const procErrorHandler = (err: Error) => {
           log.error("process error (doStream)", {
             error: err.message,
             code: (err as any).code,
@@ -1276,7 +1306,32 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
           try {
             controller.close()
           } catch {}
-        })
+        }
+
+        // FORK 2026-06-06 (B1) 把"挂监听"抽成函数, resume 失败重试时可对新进程重新挂。
+        const attachHandlers = () => {
+          lineEmitter.on("line", lineHandler)
+          lineEmitter.on("close", closeHandler)
+          proc.on("error", procErrorHandler)
+        }
+
+        // FORK 2026-06-06 (B1) resume 失败后重起一个全新会话(不带 --resume):
+        // session id 已在 closeHandler 里清掉 → buildCliArgs 不会再加 --resume → fresh。
+        const relaunchFresh = () => {
+          const freshArgs = buildCliArgs({
+            sessionKey: sk,
+            skipPermissions,
+            model: capturedModelId,
+          })
+          const ap = spawnClaudeProcess(cliPath, freshArgs, cwd, sk)
+          proc = ap.proc
+          lineEmitter = ap.lineEmitter
+          attachHandlers()
+          proc.stdin?.write(currentUserMsg + "\n")
+          log.info("relaunched fresh after resume failure", { sk })
+        }
+
+        attachHandlers()
 
         // FORK 2026-06-06 (bug#1) 中途中断的统一清理: 移除监听 + 可选关闭 controller,
         // 并对"未正常完成"的轮次真正杀掉子进程(否则中断了任务但 claude 仍在后台跑/占资源).
@@ -1317,8 +1372,8 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
         }
 
         // Send the user message
-        proc.stdin?.write(userMsg + "\n")
-        log.debug("sent user message", { textLength: userMsg.length })
+        proc.stdin?.write(currentUserMsg + "\n")
+        log.debug("sent user message", { textLength: currentUserMsg.length })
       },
       cancel() {
         // FORK 2026-06-06 (bug#1) consumer 取消 stream → 同 abort 一样杀进程 + 清 session.

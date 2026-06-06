@@ -115,11 +115,23 @@ function registerExitHandlers(): void {
     }
   }
 
+  // 'exit' 是同步钩子, 进程任何方式正常退出(含宿主自己 process.exit)都会触发 → 兜底杀子进程。
   process.on("exit", killAll)
+
+  // FORK 2026-06-06 (B2) 不再无脑 process.exit(0) 抢跑宿主(opencode)的优雅关闭。
+  // 信号到达时只补杀子进程; 仅当"我们是该信号的唯一监听者"(说明宿主没接管)才重发信号
+  // 触发默认终止。宿主若也监听, 就把关停节奏交给它, 我们只负责清理子进程。
   for (const sig of ["SIGTERM", "SIGINT"] as const) {
     process.on(sig, () => {
       killAll()
-      process.exit(0)
+      if (process.listenerCount(sig) <= 1) {
+        process.removeAllListeners(sig)
+        try {
+          process.kill(process.pid, sig)
+        } catch {
+          process.exit(0)
+        }
+      }
     })
   }
 }
@@ -129,8 +141,18 @@ export function getClaudeSessionId(key: string): string | undefined {
   return claudeSessions.get(key)
 }
 
+// FORK 2026-06-06 (C4) 方案B 后 idle 回收不再清 session id(留着 --resume), claudeSessions
+// 只增不减。这里加个上限做 LRU 淘汰: 超限时踢掉最早写入的一条, 防长期运行内存无界增长。
+const MAX_TRACKED_SESSIONS = 200
+
 export function setClaudeSessionId(key: string, sessionId: string): void {
+  // 先删再设, 刷新插入顺序(Map 按插入序迭代, 末尾=最近, 队首=最旧)。
+  if (claudeSessions.has(key)) claudeSessions.delete(key)
   claudeSessions.set(key, sessionId)
+  if (claudeSessions.size > MAX_TRACKED_SESSIONS) {
+    const oldest = claudeSessions.keys().next().value
+    if (oldest !== undefined) claudeSessions.delete(oldest)
+  }
 }
 
 export function deleteClaudeSessionId(key: string): void {

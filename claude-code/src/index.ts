@@ -11,7 +11,10 @@ export const PLUGIN_VERSION = process.env.PLUGIN_VERSION ?? "dev"
 export interface ClaudeCodeProvider extends ProviderV2 {
   (modelId: string): LanguageModelV2
   languageModel(modelId: string): LanguageModelV2
-  // FORK 2026-06-06 (兜底) 插件卸载时调, 杀掉所有活动 claude 子进程并清 session, 防孤儿残留.
+  // FORK 2026-06-06 (兜底) 杀掉所有活动 claude 子进程并清 session。
+  // 注意: opencode 当前没有插件卸载钩子会调它, 故这是"预留接口"——真正的进程兜底回收
+  // 靠 session-manager 注册的 process exit/signal handler。若将来 opencode 暴露 unload 钩子,
+  // 在那里调 provider.dispose() 即可做到更及时的回收。
   dispose(): void
 }
 
