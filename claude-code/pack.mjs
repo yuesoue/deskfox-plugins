@@ -40,6 +40,7 @@ const EXCLUDE_TOP = new Set([
   "debug.log",                     // 本地调试日志
   "HANDOFF-deskfox-fork.md",       // 开发交接文档
   "HANDOFF-deskfox-fork-2-cwd.md", // 开发交接文档
+  "HANDOFF-windows.md",            // 开发交接文档(Windows 端适配)
   "NOTES.md",                      // 开发笔记
   ".gitignore",                    // git 元数据
   ".git",                          // 不应在源目录，保险

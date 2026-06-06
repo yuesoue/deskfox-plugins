@@ -24,9 +24,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// node_modules/.pnpm/secure-json-parse@2.7.0/node_modules/secure-json-parse/index.js
+// node_modules/secure-json-parse/index.js
 var require_secure_json_parse = __commonJS({
-  "node_modules/.pnpm/secure-json-parse@2.7.0/node_modules/secure-json-parse/index.js"(exports, module) {
+  "node_modules/secure-json-parse/index.js"(exports, module) {
     "use strict";
     var hasBuffer = typeof Buffer !== "undefined";
     var suspectProtoRx = /"(?:_|\\u005[Ff])(?:_|\\u005[Ff])(?:p|\\u0070)(?:r|\\u0072)(?:o|\\u006[Ff])(?:t|\\u0074)(?:o|\\u006[Ff])(?:_|\\u005[Ff])(?:_|\\u005[Ff])"\s*:/;
@@ -132,7 +132,7 @@ var require_secure_json_parse = __commonJS({
 import { createHash } from "crypto";
 import { existsSync as existsSync2 } from "fs";
 
-// node_modules/.pnpm/@ai-sdk+provider@1.1.3/node_modules/@ai-sdk/provider/dist/index.mjs
+// node_modules/@ai-sdk/provider-utils/node_modules/@ai-sdk/provider/dist/index.mjs
 var marker = "vercel.ai.error";
 var symbol = Symbol.for(marker);
 var _a;
@@ -250,7 +250,7 @@ var symbol14 = Symbol.for(marker14);
 var _a14;
 _a14 = symbol14;
 
-// node_modules/.pnpm/nanoid@3.3.11/node_modules/nanoid/non-secure/index.js
+// node_modules/nanoid/non-secure/index.js
 var customAlphabet = (alphabet, defaultSize = 21) => {
   return (size = defaultSize) => {
     let id = "";
@@ -262,7 +262,7 @@ var customAlphabet = (alphabet, defaultSize = 21) => {
   };
 };
 
-// node_modules/.pnpm/@ai-sdk+provider-utils@2.2.8_zod@3.25.76/node_modules/@ai-sdk/provider-utils/dist/index.mjs
+// node_modules/@ai-sdk/provider-utils/dist/index.mjs
 var import_secure_json_parse = __toESM(require_secure_json_parse(), 1);
 var createIdGenerator = ({
   prefix,
