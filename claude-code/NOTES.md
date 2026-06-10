@@ -406,3 +406,19 @@ Get-CimInstance Win32_Process | Where-Object {
   ($_.Name -eq 'claude.exe' -and $_.CommandLine -like '*stream-json*') -or $_.Name -eq 'opencode-cli.exe'
 } | Select-Object ProcessId, ParentProcessId, Name, CreationDate | Format-Table -Auto
 ```
+
+## 12. Windows 探测踩坑:`where claude` 选中非 .exe shim → uv_spawn ENOENT(2026-06-10,v0.1.11)
+
+朋友机器(Win11,npm 全局安装 claude)复现:插件升级重跑 `install.ps1` 后,DeskFox 一发消息就报
+`ENOENT: no such file or directory, uv_spawn 'C:\Users\<user>\AppData\Roaming\npm\claude'`。
+
+**根因:** `where.exe claude` 的第一个结果是 npm 生成的**无扩展名 sh 脚本**(给 Git Bash/Cygwin 用的),
+它被写进 `options.cliPath`。opencode 侧 spawn(libuv `uv_spawn`)只能跑 PE 可执行文件——
+无扩展名 sh 脚本直接 ENOENT;`.cmd` shim 同样跑不了(需要 cmd.exe 解释,spawn 不带 shell 时报错)。
+之前没炸纯属探测顺序运气好,npm 装法的用户每次重装都会踩。
+
+**修复(v0.1.11,单卡点):** `Test-ClaudeExe` 一律拒绝非 `.exe` 路径。这同时覆盖三条来路:
+`where` 结果、固定候选列表、用户手输。并从候选里删掉 `npm\claude.cmd`,
+npm 装法的真实 exe 在包内:`%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe`(保留为候选)。
+
+**已被坑用户的恢复路径:** 重跑一次新版 `install.bat` 即可,探测会自动跳过 shim 选中真 exe 并重写 config。

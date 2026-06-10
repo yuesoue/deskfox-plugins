@@ -35,6 +35,9 @@ Write-Host "[1/4] plugin dist OK: $DistPath" -ForegroundColor Green
 # ---------- Step 2: 探测 claude.exe ----------
 function Test-ClaudeExe([string]$exe) {
   if (-not $exe) { return $false }
+  # opencode 侧 uv_spawn 只能跑 PE 可执行文件: npm 生成的无扩展名 sh 脚本和 .cmd shim
+  # 都会在 DeskFox 启动时报 ENOENT/EINVAL, 这里一律只认 .exe
+  if (-not $exe.ToLower().EndsWith('.exe')) { return $false }
   if (-not (Test-Path $exe)) { return $false }
   try {
     $null = & $exe --version 2>&1
@@ -61,7 +64,8 @@ try {
 # 也可能因 PATH 没刷新让 where claude 漏掉. 此条专门救这种 user.
 $candidates.Add((Join-Path $env:USERPROFILE '.local\bin\claude.exe')) | Out-Null
 $candidates.Add((Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\claude.exe')) | Out-Null
-$candidates.Add((Join-Path $env:APPDATA 'npm\claude.cmd')) | Out-Null
+# 注意: 不要加 npm\claude.cmd / npm\claude(无扩展名)做候选 —— Test-ClaudeExe 会拒绝非 .exe,
+# npm 全局安装的真实可执行文件在 node_modules 包内:
 $candidates.Add((Join-Path $env:APPDATA 'npm\claude.exe')) | Out-Null
 $candidates.Add((Join-Path $env:APPDATA 'npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe')) | Out-Null
 
@@ -75,7 +79,8 @@ foreach ($c in $candidates) {
 
 if (-not $claudePath) {
   Write-Host "[2/4] 未找到 claude.exe,请手动输入路径" -ForegroundColor Yellow
-  Write-Host "      参考:Claude Code CLI 安装后通常在 winget Links / npm global 下" -ForegroundColor DarkGray
+  Write-Host "      参考: %LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe" -ForegroundColor DarkGray
+  Write-Host "            %APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe" -ForegroundColor DarkGray
   while ($true) {
     $userInput = Read-Host "请输入 claude.exe 完整路径(直接回车退出)"
     if (-not $userInput) {
@@ -87,7 +92,7 @@ if (-not $claudePath) {
       $claudePath = $userInput
       break
     }
-    Write-Host "  X 路径无效或 claude --version 失败,请重试" -ForegroundColor Red
+    Write-Host "  X 路径无效(必须是 .exe,不能是 npm 的 claude/claude.cmd shim)或 claude --version 失败,请重试" -ForegroundColor Red
   }
 }
 
