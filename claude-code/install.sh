@@ -182,6 +182,12 @@ const provider = {
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 1000000, output: 16384 },
     },
+    fable: {
+      name: "Claude Fable 5 (via Claude Code)",
+      attachment: true, reasoning: true, tool_call: true,
+      modalities: { input: ["text", "image"], output: ["text"] },
+      limit: { context: 1000000, output: 16384 },
+    },
     haiku: {
       name: "Claude Haiku (via Claude Code)",
       attachment: true, reasoning: false, tool_call: true,
@@ -229,7 +235,8 @@ echo "${C_CYAN}下一步:${C_RESET}"
 echo "  1. 完全退出 DeskFox(macOS: Cmd+Q,确保后台 sidecar opencode-cli 也关掉:"
 echo "     pgrep -fl opencode-cli  →  pkill -f opencode-cli)"
 echo "  2. 重启 DeskFox"
-echo "  3. 模型选择器看到 'Claude Code (订阅)',选 Claude Sonnet/Opus/Haiku 任一即可"
+echo "  3. 模型选择器看到 'Claude Code (订阅)',选 Claude Sonnet/Opus/Fable/Haiku 任一即可"
+echo "     (Fable 5 需要订阅计划已开放该模型,claude CLI 里 /model 能看到 fable 即可用)"
 echo
 echo "${C_DIM}如以后 claude CLI 移位置或要换路径,重跑此脚本即可。${C_RESET}"
 echo

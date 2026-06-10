@@ -2,7 +2,7 @@
 
 > 🌏 Language: [中文](./README.md) | **English**
 
-Lets DeskFox reuse your **Claude Pro/Max subscription via the local Claude Code CLI**, so you can pick Claude Sonnet / Opus / Haiku straight from the chat model selector.
+Lets DeskFox reuse your **Claude Pro/Max subscription via the local Claude Code CLI**, so you can pick Claude Sonnet / Opus / Fable / Haiku straight from the chat model selector.
 
 No Anthropic API key needed. You won't be billed per token.
 
@@ -78,10 +78,11 @@ Once finished, **fully quit DeskFox and restart**: on macOS use `Cmd+Q`, and if 
 
 ## Usage
 
-Open DeskFox → model selector → pick one of the three under **Claude Code (订阅)**:
+Open DeskFox → model selector → pick one of the four under **Claude Code (订阅)**:
 
 - **Claude Sonnet (via Claude Code)** — balanced (recommended for daily use)
-- **Claude Opus (via Claude Code)** — most powerful (slow, expensive, but free under your subscription)
+- **Claude Opus (via Claude Code)** — powerful (slow, expensive, but free under your subscription)
+- **Claude Fable 5 (via Claude Code)** — most powerful (new tier above Opus; requires a plan that includes it — if `/model` in `claude` shows fable, you're good)
 - **Claude Haiku (via Claude Code)** — fastest (good for simple tasks)
 
 Standard chat and tool use (read files, run bash, edit code) are all supported.

@@ -3,7 +3,7 @@
 > 🌏 Language: **中文** | [English](./README.en.md)
 
 让 DeskFox 通过本机已登录的 **Claude Code CLI 复用 Claude Pro/Max 订阅**,
-在聊天窗口模型选择器里直接选 Claude Sonnet / Opus / Haiku。
+在聊天窗口模型选择器里直接选 Claude Sonnet / Opus / Fable / Haiku。
 
 不需要 Anthropic API key,不会被按 token 计费。
 
@@ -79,10 +79,11 @@ cd /path/to/deskfox-plugins/claude-code
 
 ## 使用
 
-打开 DeskFox → 模型选择器 → 选 **Claude Code (订阅)** 下三个模型之一:
+打开 DeskFox → 模型选择器 → 选 **Claude Code (订阅)** 下四个模型之一:
 
 - **Claude Sonnet (via Claude Code)** — 平衡(推荐日常用)
-- **Claude Opus (via Claude Code)** — 最强(慢、贵但订阅免费)
+- **Claude Opus (via Claude Code)** — 强(慢、贵但订阅免费)
+- **Claude Fable 5 (via Claude Code)** — 最强(Opus 之上的新档位;需订阅计划已开放,`claude` 里 `/model` 能看到 fable 即可用)
 - **Claude Haiku (via Claude Code)** — 最快(简单任务用)
 
 正常聊天 / 工具调用(读文件、跑 bash、改代码)都支持。
@@ -95,7 +96,7 @@ cd /path/to/deskfox-plugins/claude-code
 - 点输入框旁的 **📎 附件按钮** 选本机 PNG/JPG
 - 从文件管理器**拖拽**图片进聊天框
 
-三种方式都会显示缩略图,然后跟正常消息一起发出。三个模型都支持图像识别(Sonnet/Opus/Haiku 全部 vision-enabled)。
+三种方式都会显示缩略图,然后跟正常消息一起发出。四个模型都支持图像识别(Sonnet/Opus/Fable/Haiku 全部 vision-enabled)。
 
 > 如果之前装过老版本 plugin,模型可能回复"当前模型不支持图片输入" — 说明你的 `opencode.jsonc` 里 `claude-code` 节没有 `modalities` 字段(老 install 写的)。**重跑一次 `install.bat` / `install.sh` 即可修复**(脚本会自动补字段并备份原配置)。
 

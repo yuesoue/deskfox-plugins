@@ -128,6 +128,14 @@ $claudeCodeProvider = [PSCustomObject]@{
       modalities = [PSCustomObject]@{ input = @("text", "image"); output = @("text") }
       limit = [PSCustomObject]@{ context = 1000000; output = 16384 }
     }
+    fable = [PSCustomObject]@{
+      name = "Claude Fable 5 (via Claude Code)"
+      attachment = $true
+      reasoning = $true
+      tool_call = $true
+      modalities = [PSCustomObject]@{ input = @("text", "image"); output = @("text") }
+      limit = [PSCustomObject]@{ context = 1000000; output = 16384 }
+    }
     haiku = [PSCustomObject]@{
       name = "Claude Haiku (via Claude Code)"
       attachment = $true
@@ -195,7 +203,8 @@ Write-Host ""
 Write-Host "下一步:" -ForegroundColor Cyan
 Write-Host "  1. 完全退出 DeskFox(任务栏右键退出,确保 sidecar opencode-cli 也关掉)"
 Write-Host "  2. 重启 DeskFox"
-Write-Host "  3. 模型选择器看到 'Claude Code (订阅)',选 Claude Sonnet/Opus/Haiku 任一即可"
+Write-Host "  3. 模型选择器看到 'Claude Code (订阅)',选 Claude Sonnet/Opus/Fable/Haiku 任一即可"
+Write-Host "     (Fable 5 需要订阅计划已开放该模型,claude CLI 里 /model 能看到 fable 即可用)"
 Write-Host ""
 Write-Host "如以后 claude.exe 移位置或要换路径,重跑此脚本即可。" -ForegroundColor DarkGray
 Write-Host ""
