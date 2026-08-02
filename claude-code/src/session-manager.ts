@@ -312,6 +312,23 @@ export function spawnClaudeProcess(
   return ap
 }
 
+// FORK 2026-08-02 (REQ-091 快修 + REQ-090 第1档) DeskFox 桥接约定, 随每个子进程注入:
+// 1) 硬禁交互工具(版本无关双保险: 2.1.219 无头模式本就没有这俩工具, 但旧版/异版 CLI 可能有,
+//    --disallowedTools 对不存在的工具是 no-op, 加了只赚不赔), 杜绝"选择超时走默认";
+// 2) system 提示引导: 选择改纯文本问答并结束回合(user 答复走 --resume 续接);
+//    长任务禁止承诺"稍后汇报"(turn 结束即失联是架构必然, 见 OPENCODE-PLAN REQ-090),
+//    必须前台轮询到出结果。措辞是条件式的("需要用户选择时"/"长任务"), 对普通短任务惰性无干扰。
+// 逃生口: 设 OPENCODE_CLAUDE_CODE_NO_BRIDGE_PROMPT=1 可整体关掉(禁工具 + 提示)。
+export const BRIDGE_DISALLOWED_TOOLS = ["AskUserQuestion", "ExitPlanMode"]
+
+export const BRIDGE_SYSTEM_PROMPT = [
+  "<deskfox-bridge>",
+  "你通过 DeskFox 桥接以无头模式运行:用户只能看到你的文本输出,无法操作任何交互式 UI、弹窗或选择卡片。",
+  "1. 需要用户选择或确认时:不要调用 AskUserQuestion / ExitPlanMode 等交互工具(已禁用);把问题和选项用编号的纯文本列出,然后立即结束回合等待用户回复。严禁替用户默认选择后继续执行。",
+  "2. 长任务(需要等待外部进度、定时检查、轮询类任务):严禁承诺\"稍后汇报\"或\"后台继续\"后提前结束回合——回合结束后你不会被唤醒,承诺无法兑现。必须在当前回合内前台等待(sleep 后检查,循环直到出结果),拿到结果并汇报后再结束回合。",
+  "</deskfox-bridge>",
+].join("\n")
+
 export function buildCliArgs(opts: {
   sessionKey: string
   skipPermissions: boolean
@@ -329,6 +346,12 @@ export function buildCliArgs(opts: {
 
   if (model) {
     args.push("--model", model)
+  }
+
+  // FORK 2026-08-02 (REQ-091/REQ-090第1档) 见上方 BRIDGE_* 说明。
+  if (process.env.OPENCODE_CLAUDE_CODE_NO_BRIDGE_PROMPT !== "1") {
+    args.push("--disallowedTools", ...BRIDGE_DISALLOWED_TOOLS)
+    args.push("--append-system-prompt", BRIDGE_SYSTEM_PROMPT)
   }
 
   if (includeSessionId) {

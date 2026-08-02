@@ -77,6 +77,41 @@ function fingerprintFromPrompt(
   return "default"
 }
 
+// FORK 2026-08-02 (REQ-089 修法B) 发送 watchdog: 写 stdin 后该毫秒数内没收到任何 stream-json
+// 事件 → 判僵进程(REQ-051 领域的"写入已死进程石沉大海"), 杀掉重 spawn(session id 保留则自动
+// --resume)重发本条, 用户无感。只守望"写入→首个事件"窗口, 事件一到即解除, 不影响长回合。
+// 重试一次后仍无事件则放弃并给用户可见提示(胜过旧行为的无限沉默)。测试用环境变量调小。
+const SEND_WATCHDOG_MS = Number(
+  process.env.OPENCODE_CLAUDE_CODE_WATCHDOG_MS ?? 15000,
+)
+
+// FORK 2026-08-02 (REQ-089 修法A) 静默短路时的 prompt 形态快照: roles 链 + 末条消息的
+// part 类型/长度。写进 log 便于回归观察短路是否误伤真实新消息(user 反馈"发了没反应"专项)。
+function promptShapeSnapshot(
+  prompt: Parameters<LanguageModelV2["doStream"]>[0]["prompt"],
+): Record<string, unknown> {
+  const last = prompt[prompt.length - 1]
+  let lastParts: string[] = []
+  if (last) {
+    if (typeof last.content === "string") {
+      lastParts = [`text(len=${(last.content as string).length})`]
+    } else if (Array.isArray(last.content)) {
+      lastParts = (last.content as any[]).map((p) =>
+        p.type === "text"
+          ? `text(len=${(p.text ?? "").length})`
+          : p.type === "file"
+            ? `file(${p.mediaType ?? "?"})`
+            : String(p.type),
+      )
+    }
+  }
+  return {
+    roles: prompt.map((m) => m.role).join(","),
+    lastRole: last?.role,
+    lastParts: lastParts.join("|"),
+  }
+}
+
 export class ClaudeCodeLanguageModel implements LanguageModelV2 {
   readonly specificationVersion = "v2"
   readonly modelId: string
@@ -235,7 +270,11 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     // FORK 2026-04-29 同 doStream: 返回 content 包含一个空 text part 而非 [], 防止 opencode 重 poll.
     const lastMessage = options.prompt[options.prompt.length - 1]
     if (lastMessage?.role === "assistant") {
-      log.debug("doGenerate short-circuit: prompt ends with assistant")
+      // FORK 2026-08-02 (REQ-089 修法A) 短路带 prompt 形态快照, 便于回归观察是否误伤
+      log.debug(
+        "doGenerate short-circuit: prompt ends with assistant",
+        promptShapeSnapshot(options.prompt),
+      )
       return {
         content: [{ type: "text", text: "" }] as any,
         finishReason: "stop",
@@ -261,7 +300,12 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     // FORK 2026-04-29 (bug#3) message-builder 返回 "" 表示 prompt 没有可发的 user content.
     // 不能 spawn Claude — 走跟 'prompt ends with assistant' 同样的 silent short-circuit, 避免 UI 红条.
     if (!userMsg) {
-      log.debug("doGenerate silent: empty user message after message-builder")
+      // FORK 2026-08-02 (REQ-089 修法A) 此路径经 message-builder 收紧后只剩"确证无新内容"
+      // (有实质被丢附件时 message-builder 已改发兜底说明)。升 warn + 快照, 便于回归观察。
+      log.warn(
+        "doGenerate silent short-circuit: empty user message after message-builder",
+        promptShapeSnapshot(options.prompt),
+      )
       return {
         content: [{ type: "text", text: "" }] as any,
         finishReason: "stop",
@@ -606,7 +650,12 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
     // 必须返回"完整空响应" stream 才能让 opencode 状态机认这次 turn 真正结束 (只 stream-start+finish 不够).
     const lastMessage = options.prompt[options.prompt.length - 1]
     if (lastMessage?.role === "assistant") {
-      log.debug("doStream short-circuit: prompt ends with assistant")
+      // FORK 2026-08-02 (REQ-089 修法A) 短路带 prompt 形态快照, 便于回归观察是否误伤。
+      // 此路径属 step-loop 正常轮询(每轮 turn 结束后必来一次), 保持 debug 级避免刷屏。
+      log.debug(
+        "doStream short-circuit: prompt ends with assistant",
+        promptShapeSnapshot(options.prompt),
+      )
       const stream = new ReadableStream<LanguageModelV2StreamPart>({
         start(controller) {
           const tid = generateId()
@@ -646,7 +695,11 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
 
     // FORK 2026-04-29 (bug#3) 同 doGenerate: 空 userMsg 走 silent short-circuit, 避免 UI 红条.
     if (!userMsg) {
-      log.debug("doStream silent: empty user message after message-builder")
+      // FORK 2026-08-02 (REQ-089 修法A) 同 doGenerate: 收紧后只剩"确证无新内容", 升 warn + 快照。
+      log.warn(
+        "doStream silent short-circuit: empty user message after message-builder",
+        promptShapeSnapshot(options.prompt),
+      )
       const tid = generateId()
       const modelIdSnapshot = this.modelId
       const stream = new ReadableStream<LanguageModelV2StreamPart>({
@@ -762,8 +815,20 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
         let resumeRetried = false
         let currentUserMsg = userMsg
 
+        // FORK 2026-08-02 (REQ-089 修法B) 发送 watchdog 状态(定义见 armWatchdog/onWatchdogFire)
+        let watchdogTimer: ReturnType<typeof setTimeout> | undefined
+        let watchdogRetried = false
+        const clearWatchdog = () => {
+          if (watchdogTimer) {
+            clearTimeout(watchdogTimer)
+            watchdogTimer = undefined
+          }
+        }
+
         const lineHandler = (line: string) => {
           if (!line.trim()) return
+          // FORK 2026-08-02 (REQ-089 修法B) 任何 stream 输出 = 进程活着, 解除发送守望
+          clearWatchdog()
           if (controllerClosed) return
 
           try {
@@ -1280,6 +1345,7 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
 
         const closeHandler = () => {
           log.debug("readline closed")
+          clearWatchdog()
           if (controllerClosed) return
 
           // resume 进程没 init 就静默关闭 → 转 fresh 重试
@@ -1311,6 +1377,7 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
             cliPath,
             cwd,
           })
+          clearWatchdog()
           if (controllerClosed) return
           controllerClosed = true
           controller.enqueue({ type: "error", error: err })
@@ -1340,6 +1407,84 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
           attachHandlers()
           proc.stdin?.write(currentUserMsg + "\n")
           log.info("relaunched fresh after resume failure", { sk })
+          // FORK 2026-08-02 (REQ-089 修法B) 重发的这条同样守望
+          armWatchdog()
+        }
+
+        // FORK 2026-08-02 (REQ-089 修法B) watchdog 触发:
+        // 第一次 → 判僵进程, 杀掉重 spawn 重发本条(session id 被 deleteActiveProcess 标记
+        // 主动杀而保留, buildCliArgs 自动带 --resume; 换进程重挂监听复用 B1 骨架)。
+        // SIGSTOP 挂起的进程吃不到 SIGTERM, 由 deleteActiveProcess 的 2s SIGKILL 兜底杀掉。
+        // 第二次仍无事件 → 放弃, 给用户可见错误并正常收流, 胜过旧行为的无限沉默。
+        const onWatchdogFire = () => {
+          watchdogTimer = undefined
+          if (controllerClosed) return
+          if (!watchdogRetried) {
+            watchdogRetried = true
+            log.warn(
+              "send watchdog fired: no stream events after stdin write, killing & respawning",
+              { sk, timeoutMs: SEND_WATCHDOG_MS },
+            )
+            lineEmitter.off("line", lineHandler)
+            lineEmitter.off("close", closeHandler)
+            deleteActiveProcess(sk)
+            const hasSid = !!getClaudeSessionId(sk)
+            const retryArgs = buildCliArgs({
+              sessionKey: sk,
+              skipPermissions,
+              model: capturedModelId,
+            })
+            const ap = spawnClaudeProcess(cliPath, retryArgs, cwd, sk)
+            proc = ap.proc
+            lineEmitter = ap.lineEmitter
+            // 重试进程若 --resume 失败, 由既有 B1 逻辑兜底(转 fresh + 摘要重建)
+            usingResume = hasSid
+            sawInit = false
+            attachHandlers()
+            proc.stdin?.write(currentUserMsg + "\n")
+            log.info("watchdog respawn complete, message re-sent", {
+              sk,
+              viaResume: hasSid,
+            })
+            armWatchdog()
+          } else {
+            log.error(
+              "send watchdog fired twice: giving up, emitting visible failure",
+              { sk },
+            )
+            controllerClosed = true
+            lineEmitter.off("line", lineHandler)
+            lineEmitter.off("close", closeHandler)
+            deleteActiveProcess(sk)
+            if (!textStarted) {
+              controller.enqueue({ type: "text-start", id: textId } as any)
+              textStarted = true
+            }
+            controller.enqueue({
+              type: "text-delta",
+              id: textId,
+              delta:
+                "⚠️ Claude CLI 子进程无响应(已自动重建并重试一次仍失败)。请重发本条消息;若持续出现,请检查 claude CLI 能否在终端正常启动。",
+            })
+            controller.enqueue({ type: "text-end", id: textId })
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: makeUsage(),
+              providerMetadata: {
+                "claude-code": { watchdogGaveUp: true },
+              },
+            })
+            try {
+              controller.close()
+            } catch {}
+          }
+        }
+
+        const armWatchdog = () => {
+          clearWatchdog()
+          watchdogTimer = setTimeout(onWatchdogFire, SEND_WATCHDOG_MS)
+          watchdogTimer.unref?.()
         }
 
         attachHandlers()
@@ -1354,6 +1499,8 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
         // 万一 resume 这个被 kill 的 session 不干净, spawnClaudeProcess 的 stderr 兜底会
         // 检测到错误并清掉 id, 自动退回"摘要重建"路径, 不会卡死。
         const teardown = (reason: string, closeController: boolean) => {
+          // FORK 2026-08-02 (REQ-089 修法B) 中断即解除守望, 防 abort 后 watchdog 又拉起新进程
+          clearWatchdog()
           if (controllerClosed) return
           controllerClosed = true
           lineEmitter.off("line", lineHandler)
@@ -1385,6 +1532,8 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
         // Send the user message
         proc.stdin?.write(currentUserMsg + "\n")
         log.debug("sent user message", { textLength: currentUserMsg.length })
+        // FORK 2026-08-02 (REQ-089 修法B) 守望本次发送: N 秒无任何事件 → 重建重发
+        armWatchdog()
       },
       cancel() {
         // FORK 2026-06-06 (bug#1) consumer 取消 stream → 同 abort 一样杀进程 + 清 session.

@@ -144,6 +144,11 @@ Now continuing with the current message:
     messages.unshift(prompt[i])
   }
 
+  // FORK 2026-08-02 (REQ-089 修法A) 记录"有实质内容但透传不了"的 part(非图片附件/编不出的图片)。
+  // 若最终 content 为空但确有这类 part,说明用户发了东西 → 不能静默短路,改发兜底说明,
+  // 让 Claude 给用户一个可见回应,治"发附件后没任何反应"。
+  const droppedParts: string[] = []
+
   for (const msg of messages) {
     if (msg.role === "user") {
       // FORK: filter empty text blocks to avoid Anthropic 400 cache_control error 2026-04-29
@@ -160,6 +165,7 @@ Now continuing with the current message:
               log.warn("skipping non-image file part in user message", {
                 mediaType,
               })
+              droppedParts.push(`file(${mediaType ?? "unknown"})`)
               continue
             }
             // 通配 image/* 没法当具体 media_type 用, 退回 image/png 作为最常见选择.
@@ -173,6 +179,7 @@ Now continuing with the current message:
                 mediaType,
                 dataType: typeof part.data,
               })
+              droppedParts.push(`image-unencodable(${mediaType})`)
             }
           } else if (part.type === "tool-result") {
             const p = part as any
@@ -200,10 +207,26 @@ Now continuing with the current message:
   }
 
   if (content.length === 0) {
-    // FORK 2026-04-29 旧版抛错会在 UI 冒红条 ('prompt has no user content...').
-    // 改成返回空字符串作 sentinel — caller (doStream/doGenerate) 检测到空就走 short-circuit
-    // 路径返回空 stream, 避免给 Claude CLI 写入空 / 占位消息触发 400 或自循环.
-    return ""
+    // FORK 2026-08-02 (REQ-089 修法A) 有实质 part 被丢弃 → 不是"无新内容", 静默短路会表现成
+    // "发了没反应"。改发兜底说明, 让 Claude 回一句可见的提示, 用户至少知道消息到了但附件不支持。
+    if (droppedParts.length > 0) {
+      log.warn(
+        "all user parts undeliverable — sending fallback note instead of silent short-circuit",
+        { droppedParts },
+      )
+      content.push({
+        type: "text",
+        text:
+          `[系统提示] 用户刚发来的消息只包含无法透传给你的内容(${droppedParts.join(", ")});` +
+          `当前通道仅支持文本和图片。请用用户的语言简短告知:该消息的附件类型暂不支持,` +
+          `请改用文本描述或截图重发。不要执行其他操作。`,
+      })
+    } else {
+      // FORK 2026-04-29 旧版抛错会在 UI 冒红条 ('prompt has no user content...').
+      // 改成返回空字符串作 sentinel — caller (doStream/doGenerate) 检测到空就走 short-circuit
+      // 路径返回空 stream, 避免给 Claude CLI 写入空 / 占位消息触发 400 或自循环.
+      return ""
+    }
   }
 
   return JSON.stringify({

@@ -96,6 +96,7 @@ Windows 用户一键装。流程:
 
 按时间倒序:
 
+- 2026-08-02 **发版 v0.1.12** — 插件体验专项三连修(OPENCODE-PLAN REQ-089/090/091):静默短路收紧 + 发送 watchdog + 交互工具拦截改纯文本问答 + 长任务前台等待约定,详见 §13
 - 2026-05-20 **发版 v0.1.3** — 含 ProviderInitError 修复 + 诊断版本号埋点(dist log 启动行 / install 脚本结尾打印 / zip 命名带版本号 `claude-code-0.1.3.zip`),详见 §10
 - 2026-05-20 修 ProviderInitError 根因 — tsup 加 `noExternal: [/@ai-sdk\//]` 让 dist 真正 self-contained,详见 §10;同步修 logger 默认日志路径硬编码到我开发机的 bug;补 `.gitignore` 排除运行时残留(`debug.log` / `*.log` / `.claude/`);清上游遗留 5 个死文件(`mod.ts` / `jsr.json` / `test.ts` / `10097.patch` / `.github/workflows/publish.yml`)
 - 2026-05-13 image attachment 端到端跑通(image content block + modalities 字段)— 详见 §9
@@ -422,3 +423,36 @@ Get-CimInstance Win32_Process | Where-Object {
 npm 装法的真实 exe 在包内:`%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe`(保留为候选)。
 
 **已被坑用户的恢复路径:** 重跑一次新版 `install.bat` 即可,探测会自动跳过 shim 选中真 exe 并重写 config。
+
+## 13. 体验专项三连修:发送无响应 / 选择不透传 / 长任务约定(2026-08-02,v0.1.12,REQ-089/090/091)
+
+计划与排查明细见 OPENCODE-PLAN `需求计划/2026-08-02-2.md` 及需求池三份 REQ doc。
+
+### 13.1 REQ-089 修法A:静默短路收紧(message-builder + 两条 short-circuit)
+
+- `message-builder.ts`:用户消息的全部 part 都透传不了(非图片附件 / 编不出的图片)时,**不再返回 `""` 走静默短路**(旧行为 = UI 上"发了没反应"),改为发一条兜底说明消息,让 Claude 给用户可见回应("该附件类型暂不支持,请改文本或截图")。真正无内容(空 text、纯轮询)仍返回 `""` 保持短路。
+- 两条短路路径(`no-new-turn` / `no-new-turn-empty-msg`)log 均带 `promptShapeSnapshot`(roles 链 + 末条消息 part 类型/长度);`empty-msg` 路径升 **warn** 级(收紧后它只剩"确证无新内容",出现即值得看一眼),`ends-with-assistant` 保持 debug(step-loop 每轮正常轮询必来,warn 会刷屏)。
+- **真机定位指引**(复现"发了没反应"时开 DEBUG 看 debug.log):若出现 `silent short-circuit` warn → 误伤还有残留形态,拿快照回来对;若 `reusing active process` 后长时间无 `stream message` → 僵进程(已由修法B watchdog 自动救,还能看到 `send watchdog fired`)。
+
+### 13.2 REQ-089 修法B:发送 watchdog(doStream)
+
+- 写 stdin 后 **15s**(`OPENCODE_CLAUDE_CODE_WATCHDOG_MS` 可调)没收到**任何** stream-json 事件 → 判僵进程:杀掉(`deleteActiveProcess` SIGTERM→2s SIGKILL 兜底,SIGSTOP 挂起的进程也能杀)→ 重 spawn(session id 因"主动杀"标记而保留 → `buildCliArgs` 自动带 `--resume`)→ 重发本条,复用 B1 的"换进程重挂监听"骨架,用户无感。重试进程 resume 失败由既有 B1 逻辑兜底(转 fresh + 摘要重建)。
+- 重试后仍无事件 → **放弃**:发可见 ⚠️ 提示 + 正常收流(`providerMetadata["claude-code"].watchdogGaveUp=true`),胜过旧行为的无限沉默。
+- 只守望"写入 → 首个事件"窗口:任何事件即解除,不影响长回合思考;abort/cancel/teardown 也解除(防中断后 watchdog 又拉起新进程)。
+- 单测(`send-watchdog.test.ts` + `fake-claude.sh`/`.cjs` 真子进程,不花 token):自愈路径 / SIGSTOP 验收场景(池中复用进程被挂起)/ 二次放弃路径。**踩坑:fake CLI 必须 sh 入口**(~10ms 起步),node 冷启在全量套件负载下可超小窗口,直接用 node 会出现"应答进程还在启动就被当僵死"的测试竞态。`doGenerate` 未加 watchdog(DeskFox 主链路走 doStream,doGenerate 每次 fresh spawn 且用完即杀)。
+
+### 13.3 REQ-091 快修:交互工具拦截改纯文本问答
+
+- **真机核实(claude 2.1.219,双向 stream-json 无头,Mac)**:`system init` 的 tools 列表里**本就没有 AskUserQuestion / ExitPlanMode**;硬要求模型调用时,模型自己声明工具不存在并转纯文本提问,turn 正常结束。也**没有 control_request** 问答通道参与。→ user 遇到的"选择超时走默认"应来自旧版/异版 CLI(Win 端 CLI 版本待抽查),拦截点选在 **CLI 参数层**而非 control 通道。
+- **双保险(版本无关)**,`buildCliArgs` 注入:
+  1. `--disallowedTools AskUserQuestion ExitPlanMode` — 硬禁,对不存在的工具是 no-op,加了只赚不赔;
+  2. `--append-system-prompt BRIDGE_SYSTEM_PROMPT`(`<deskfox-bridge>` 段)— 引导:需要选择/确认时用编号纯文本列选项并**结束回合等待**,user 答复走 `--resume` 续接;严禁替用户默认选。
+- **真机验证**:部署方式二选一场景(haiku)→ 输出编号纯文本选项,9s 回合正常结束,无超时无默认选。流内旧渲染(`_Asking: ..._` / plan yes/no)保留作最后兜底。
+- 二期"真透传 UI"(control_request → DeskFox 选择卡片)按计划不做,等快修跑一段再看。
+
+### 13.4 REQ-090 第1档:长任务前台等待约定(同段 BRIDGE_SYSTEM_PROMPT 承载)
+
+- 约定:严禁承诺"稍后汇报/后台继续"后提前结束回合(turn 结束即失联是 provider 架构必然);长任务必须当前回合内前台等待(sleep+检查循环)直到出结果。回合不结束 → DeskFox 持续"执行中",结果必达;点停止可中断(abort 真杀,v0.1.6+)。
+- 注入点决策:选**插件统一注入**(vs 项目 AGENTS/CLAUDE 指令)——全局零配置双端一致;措辞条件式,短任务命中不了任何条款,干扰可忽略(真机 probe 验证普通消息行为无变化)。
+- 第3档(between-turns 推送 / promptAsync / sessionID 注入)评估结论:**不做**,理由与重开条件见 OPENCODE-PLAN 需求池 REQ-090 doc 交付记录(核心:第1档把"自发后台产出"场景挖空;idle 豁免与 REQ-051 冲突;定时类正解在调度层)。
+- **逃生口**:环境变量 `OPENCODE_CLAUDE_CODE_NO_BRIDGE_PROMPT=1` 整体关闭桥接注入(禁工具 + 提示),排查"提示是否干扰行为"时用。

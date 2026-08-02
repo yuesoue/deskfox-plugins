@@ -24,9 +24,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// node_modules/secure-json-parse/index.js
+// node_modules/.pnpm/secure-json-parse@2.7.0/node_modules/secure-json-parse/index.js
 var require_secure_json_parse = __commonJS({
-  "node_modules/secure-json-parse/index.js"(exports, module) {
+  "node_modules/.pnpm/secure-json-parse@2.7.0/node_modules/secure-json-parse/index.js"(exports, module) {
     "use strict";
     var hasBuffer = typeof Buffer !== "undefined";
     var suspectProtoRx = /"(?:_|\\u005[Ff])(?:_|\\u005[Ff])(?:p|\\u0070)(?:r|\\u0072)(?:o|\\u006[Ff])(?:t|\\u0074)(?:o|\\u006[Ff])(?:_|\\u005[Ff])(?:_|\\u005[Ff])"\s*:/;
@@ -132,7 +132,7 @@ var require_secure_json_parse = __commonJS({
 import { createHash } from "crypto";
 import { existsSync as existsSync2 } from "fs";
 
-// node_modules/@ai-sdk/provider-utils/node_modules/@ai-sdk/provider/dist/index.mjs
+// node_modules/.pnpm/@ai-sdk+provider@1.1.3/node_modules/@ai-sdk/provider/dist/index.mjs
 var marker = "vercel.ai.error";
 var symbol = Symbol.for(marker);
 var _a;
@@ -250,7 +250,7 @@ var symbol14 = Symbol.for(marker14);
 var _a14;
 _a14 = symbol14;
 
-// node_modules/nanoid/non-secure/index.js
+// node_modules/.pnpm/nanoid@3.3.11/node_modules/nanoid/non-secure/index.js
 var customAlphabet = (alphabet, defaultSize = 21) => {
   return (size = defaultSize) => {
     let id = "";
@@ -262,7 +262,7 @@ var customAlphabet = (alphabet, defaultSize = 21) => {
   };
 };
 
-// node_modules/@ai-sdk/provider-utils/dist/index.mjs
+// node_modules/.pnpm/@ai-sdk+provider-utils@2.2.8_zod@3.25.76/node_modules/@ai-sdk/provider-utils/dist/index.mjs
 var import_secure_json_parse = __toESM(require_secure_json_parse(), 1);
 var createIdGenerator = ({
   prefix,
@@ -570,6 +570,7 @@ Now continuing with the current message:
     if (prompt[i].role === "assistant") break;
     messages.unshift(prompt[i]);
   }
+  const droppedParts = [];
   for (const msg of messages) {
     if (msg.role === "user") {
       if (typeof msg.content === "string" && msg.content) {
@@ -584,6 +585,7 @@ Now continuing with the current message:
               log.warn("skipping non-image file part in user message", {
                 mediaType
               });
+              droppedParts.push(`file(${mediaType ?? "unknown"})`);
               continue;
             }
             const concreteMediaType = mediaType === "image/*" ? "image/png" : mediaType;
@@ -595,6 +597,7 @@ Now continuing with the current message:
                 mediaType,
                 dataType: typeof part.data
               });
+              droppedParts.push(`image-unencodable(${mediaType})`);
             }
           } else if (part.type === "tool-result") {
             const p = part;
@@ -617,7 +620,18 @@ Now continuing with the current message:
     }
   }
   if (content.length === 0) {
-    return "";
+    if (droppedParts.length > 0) {
+      log.warn(
+        "all user parts undeliverable \u2014 sending fallback note instead of silent short-circuit",
+        { droppedParts }
+      );
+      content.push({
+        type: "text",
+        text: `[\u7CFB\u7EDF\u63D0\u793A] \u7528\u6237\u521A\u53D1\u6765\u7684\u6D88\u606F\u53EA\u5305\u542B\u65E0\u6CD5\u900F\u4F20\u7ED9\u4F60\u7684\u5185\u5BB9(${droppedParts.join(", ")});\u5F53\u524D\u901A\u9053\u4EC5\u652F\u6301\u6587\u672C\u548C\u56FE\u7247\u3002\u8BF7\u7528\u7528\u6237\u7684\u8BED\u8A00\u7B80\u77ED\u544A\u77E5:\u8BE5\u6D88\u606F\u7684\u9644\u4EF6\u7C7B\u578B\u6682\u4E0D\u652F\u6301,\u8BF7\u6539\u7528\u6587\u672C\u63CF\u8FF0\u6216\u622A\u56FE\u91CD\u53D1\u3002\u4E0D\u8981\u6267\u884C\u5176\u4ED6\u64CD\u4F5C\u3002`
+      });
+    } else {
+      return "";
+    }
   }
   return JSON.stringify({
     type: "user",
@@ -845,6 +859,14 @@ function spawnClaudeProcess(cliPath, cliArgs, cwd, sessionKey2) {
   });
   return ap;
 }
+var BRIDGE_DISALLOWED_TOOLS = ["AskUserQuestion", "ExitPlanMode"];
+var BRIDGE_SYSTEM_PROMPT = [
+  "<deskfox-bridge>",
+  "\u4F60\u901A\u8FC7 DeskFox \u6865\u63A5\u4EE5\u65E0\u5934\u6A21\u5F0F\u8FD0\u884C:\u7528\u6237\u53EA\u80FD\u770B\u5230\u4F60\u7684\u6587\u672C\u8F93\u51FA,\u65E0\u6CD5\u64CD\u4F5C\u4EFB\u4F55\u4EA4\u4E92\u5F0F UI\u3001\u5F39\u7A97\u6216\u9009\u62E9\u5361\u7247\u3002",
+  "1. \u9700\u8981\u7528\u6237\u9009\u62E9\u6216\u786E\u8BA4\u65F6:\u4E0D\u8981\u8C03\u7528 AskUserQuestion / ExitPlanMode \u7B49\u4EA4\u4E92\u5DE5\u5177(\u5DF2\u7981\u7528);\u628A\u95EE\u9898\u548C\u9009\u9879\u7528\u7F16\u53F7\u7684\u7EAF\u6587\u672C\u5217\u51FA,\u7136\u540E\u7ACB\u5373\u7ED3\u675F\u56DE\u5408\u7B49\u5F85\u7528\u6237\u56DE\u590D\u3002\u4E25\u7981\u66FF\u7528\u6237\u9ED8\u8BA4\u9009\u62E9\u540E\u7EE7\u7EED\u6267\u884C\u3002",
+  '2. \u957F\u4EFB\u52A1(\u9700\u8981\u7B49\u5F85\u5916\u90E8\u8FDB\u5EA6\u3001\u5B9A\u65F6\u68C0\u67E5\u3001\u8F6E\u8BE2\u7C7B\u4EFB\u52A1):\u4E25\u7981\u627F\u8BFA"\u7A0D\u540E\u6C47\u62A5"\u6216"\u540E\u53F0\u7EE7\u7EED"\u540E\u63D0\u524D\u7ED3\u675F\u56DE\u5408\u2014\u2014\u56DE\u5408\u7ED3\u675F\u540E\u4F60\u4E0D\u4F1A\u88AB\u5524\u9192,\u627F\u8BFA\u65E0\u6CD5\u5151\u73B0\u3002\u5FC5\u987B\u5728\u5F53\u524D\u56DE\u5408\u5185\u524D\u53F0\u7B49\u5F85(sleep \u540E\u68C0\u67E5,\u5FAA\u73AF\u76F4\u5230\u51FA\u7ED3\u679C),\u62FF\u5230\u7ED3\u679C\u5E76\u6C47\u62A5\u540E\u518D\u7ED3\u675F\u56DE\u5408\u3002',
+  "</deskfox-bridge>"
+].join("\n");
 function buildCliArgs(opts) {
   const { sessionKey: sessionKey2, skipPermissions, includeSessionId = true, model } = opts;
   const args = [
@@ -856,6 +878,10 @@ function buildCliArgs(opts) {
   ];
   if (model) {
     args.push("--model", model);
+  }
+  if (process.env.OPENCODE_CLAUDE_CODE_NO_BRIDGE_PROMPT !== "1") {
+    args.push("--disallowedTools", ...BRIDGE_DISALLOWED_TOOLS);
+    args.push("--append-system-prompt", BRIDGE_SYSTEM_PROMPT);
   }
   if (includeSessionId) {
     const sessionId = claudeSessions.get(sessionKey2);
@@ -957,6 +983,27 @@ function fingerprintFromPrompt(prompt) {
     }
   }
   return "default";
+}
+var SEND_WATCHDOG_MS = Number(
+  process.env.OPENCODE_CLAUDE_CODE_WATCHDOG_MS ?? 15e3
+);
+function promptShapeSnapshot(prompt) {
+  const last = prompt[prompt.length - 1];
+  let lastParts = [];
+  if (last) {
+    if (typeof last.content === "string") {
+      lastParts = [`text(len=${last.content.length})`];
+    } else if (Array.isArray(last.content)) {
+      lastParts = last.content.map(
+        (p) => p.type === "text" ? `text(len=${(p.text ?? "").length})` : p.type === "file" ? `file(${p.mediaType ?? "?"})` : String(p.type)
+      );
+    }
+  }
+  return {
+    roles: prompt.map((m) => m.role).join(","),
+    lastRole: last?.role,
+    lastParts: lastParts.join("|")
+  };
 }
 var ClaudeCodeLanguageModel = class {
   specificationVersion = "v2";
@@ -1068,7 +1115,10 @@ var ClaudeCodeLanguageModel = class {
     }
     const lastMessage = options.prompt[options.prompt.length - 1];
     if (lastMessage?.role === "assistant") {
-      log.debug("doGenerate short-circuit: prompt ends with assistant");
+      log.debug(
+        "doGenerate short-circuit: prompt ends with assistant",
+        promptShapeSnapshot(options.prompt)
+      );
       return {
         content: [{ type: "text", text: "" }],
         finishReason: "stop",
@@ -1089,7 +1139,10 @@ var ClaudeCodeLanguageModel = class {
     const includeHistoryContext = !hasExistingSession && hasPriorConversation;
     const userMsg = getClaudeUserMessage(options.prompt, includeHistoryContext);
     if (!userMsg) {
-      log.debug("doGenerate silent: empty user message after message-builder");
+      log.warn(
+        "doGenerate silent short-circuit: empty user message after message-builder",
+        promptShapeSnapshot(options.prompt)
+      );
       return {
         content: [{ type: "text", text: "" }],
         finishReason: "stop",
@@ -1365,7 +1418,10 @@ ${plan}
     }
     const lastMessage = options.prompt[options.prompt.length - 1];
     if (lastMessage?.role === "assistant") {
-      log.debug("doStream short-circuit: prompt ends with assistant");
+      log.debug(
+        "doStream short-circuit: prompt ends with assistant",
+        promptShapeSnapshot(options.prompt)
+      );
       const stream2 = new ReadableStream({
         start(controller) {
           const tid = generateId();
@@ -1400,7 +1456,10 @@ ${plan}
     const includeHistoryContext = !hasExistingSession && !hasActiveProcess && hasPriorConversation;
     const userMsg = getClaudeUserMessage(options.prompt, includeHistoryContext);
     if (!userMsg) {
-      log.debug("doStream silent: empty user message after message-builder");
+      log.warn(
+        "doStream silent short-circuit: empty user message after message-builder",
+        promptShapeSnapshot(options.prompt)
+      );
       const tid = generateId();
       const modelIdSnapshot = this.modelId;
       const stream2 = new ReadableStream({
@@ -1480,8 +1539,17 @@ ${plan}
         let sawInit = false;
         let resumeRetried = false;
         let currentUserMsg = userMsg;
+        let watchdogTimer;
+        let watchdogRetried = false;
+        const clearWatchdog = () => {
+          if (watchdogTimer) {
+            clearTimeout(watchdogTimer);
+            watchdogTimer = void 0;
+          }
+        };
         const lineHandler = (line) => {
           if (!line.trim()) return;
+          clearWatchdog();
           if (controllerClosed) return;
           try {
             const msg = JSON.parse(line);
@@ -1905,6 +1973,7 @@ ${plan}
         };
         const closeHandler = () => {
           log.debug("readline closed");
+          clearWatchdog();
           if (controllerClosed) return;
           if (tryResumeRetry()) return;
           controllerClosed = true;
@@ -1933,6 +2002,7 @@ ${plan}
             cliPath,
             cwd
           });
+          clearWatchdog();
           if (controllerClosed) return;
           controllerClosed = true;
           controller.enqueue({ type: "error", error: err });
@@ -1958,9 +2028,79 @@ ${plan}
           attachHandlers();
           proc.stdin?.write(currentUserMsg + "\n");
           log.info("relaunched fresh after resume failure", { sk });
+          armWatchdog();
+        };
+        const onWatchdogFire = () => {
+          watchdogTimer = void 0;
+          if (controllerClosed) return;
+          if (!watchdogRetried) {
+            watchdogRetried = true;
+            log.warn(
+              "send watchdog fired: no stream events after stdin write, killing & respawning",
+              { sk, timeoutMs: SEND_WATCHDOG_MS }
+            );
+            lineEmitter.off("line", lineHandler);
+            lineEmitter.off("close", closeHandler);
+            deleteActiveProcess(sk);
+            const hasSid = !!getClaudeSessionId(sk);
+            const retryArgs = buildCliArgs({
+              sessionKey: sk,
+              skipPermissions,
+              model: capturedModelId
+            });
+            const ap = spawnClaudeProcess(cliPath, retryArgs, cwd, sk);
+            proc = ap.proc;
+            lineEmitter = ap.lineEmitter;
+            usingResume = hasSid;
+            sawInit = false;
+            attachHandlers();
+            proc.stdin?.write(currentUserMsg + "\n");
+            log.info("watchdog respawn complete, message re-sent", {
+              sk,
+              viaResume: hasSid
+            });
+            armWatchdog();
+          } else {
+            log.error(
+              "send watchdog fired twice: giving up, emitting visible failure",
+              { sk }
+            );
+            controllerClosed = true;
+            lineEmitter.off("line", lineHandler);
+            lineEmitter.off("close", closeHandler);
+            deleteActiveProcess(sk);
+            if (!textStarted) {
+              controller.enqueue({ type: "text-start", id: textId });
+              textStarted = true;
+            }
+            controller.enqueue({
+              type: "text-delta",
+              id: textId,
+              delta: "\u26A0\uFE0F Claude CLI \u5B50\u8FDB\u7A0B\u65E0\u54CD\u5E94(\u5DF2\u81EA\u52A8\u91CD\u5EFA\u5E76\u91CD\u8BD5\u4E00\u6B21\u4ECD\u5931\u8D25)\u3002\u8BF7\u91CD\u53D1\u672C\u6761\u6D88\u606F;\u82E5\u6301\u7EED\u51FA\u73B0,\u8BF7\u68C0\u67E5 claude CLI \u80FD\u5426\u5728\u7EC8\u7AEF\u6B63\u5E38\u542F\u52A8\u3002"
+            });
+            controller.enqueue({ type: "text-end", id: textId });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: makeUsage(),
+              providerMetadata: {
+                "claude-code": { watchdogGaveUp: true }
+              }
+            });
+            try {
+              controller.close();
+            } catch {
+            }
+          }
+        };
+        const armWatchdog = () => {
+          clearWatchdog();
+          watchdogTimer = setTimeout(onWatchdogFire, SEND_WATCHDOG_MS);
+          watchdogTimer.unref?.();
         };
         attachHandlers();
         const teardown = (reason, closeController) => {
+          clearWatchdog();
           if (controllerClosed) return;
           controllerClosed = true;
           lineEmitter.off("line", lineHandler);
@@ -1987,6 +2127,7 @@ ${plan}
         }
         proc.stdin?.write(currentUserMsg + "\n");
         log.debug("sent user message", { textLength: currentUserMsg.length });
+        armWatchdog();
       },
       cancel() {
         onConsumerCancel?.();
@@ -2001,7 +2142,7 @@ ${plan}
 };
 
 // src/index.ts
-var PLUGIN_VERSION = "0.1.9";
+var PLUGIN_VERSION = "0.1.12";
 function createClaudeCode(settings = {}) {
   const cliPath = settings.cliPath ?? process.env.CLAUDE_CLI_PATH ?? "claude";
   const cwd = settings.cwd ?? process.cwd();
