@@ -461,6 +461,22 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
           }
 
           if (msg.type === "result") {
+            // FORK 2026-08-15 (静默空回复修复) 同 doStream: --resume 带未完结后台任务的会话时,
+            // CLI 会先补一条 num_turns=0 的空 result 给恢复通知收尾, 不是本轮的答案, 忽略之。
+            if (
+              msg.num_turns === 0 &&
+              !responseText &&
+              !thinkingText &&
+              toolCalls.length === 0
+            ) {
+              log.warn("ignoring foreign result (num_turns=0, no content this turn)", {
+                sk,
+                sessionId: msg.session_id,
+                durationMs: msg.duration_ms,
+              })
+              return
+            }
+
             if (msg.session_id) {
               setClaudeSessionId(sk, msg.session_id)
             }
@@ -1256,6 +1272,33 @@ export class ClaudeCodeLanguageModel implements LanguageModelV2 {
               // result{isError:true}。若本次用了 resume 且从未 init, 这条 result 就是 resume
               // 失败信号 → 转 fresh 重试, 别把它当正常完成(否则这条消息被赔成空回复)。
               if (tryResumeRetry()) return
+
+              // FORK 2026-08-15 (静默空回复修复) 不属于本轮的 result 必须忽略。
+              // 实测(claude 2.1.x): --resume 一个"上次结束时留有未完结后台任务"的会话, CLI 会先
+              // 给那条恢复通知补一个空回合再处理本轮消息, stdout 顺序是:
+              //   system task_notification → system init → result{num_turns:0,result:""}
+              //   → system init(第二次) → assistant(真正的回答) → result{num_turns:1}
+              // 旧行为在第 3 行就判本轮完成并 controller.close(), 真正的回答无处可去 →
+              // UI 上是"回车了没有任何反应"(零 token / 无文本 / 无报错), 而 CLI 那头照常干完活。
+              // 判据取 num_turns===0(CLI 明说这个 turn 没有轮次)且本轮确实一点内容都没产出,
+              // 双条件都满足才忽略, 避免误伤"模型真的返回空回复"(那种 num_turns>=1)。
+              // 安全网: 忽略后重新 arm 发送 watchdog, 万一之后再无任何事件, 由既有 watchdog
+              // 兜底重建重发 / 给可见错误, 不会静默挂死。
+              if (
+                msg.num_turns === 0 &&
+                !textStarted &&
+                toolCallsById.size === 0 &&
+                reasoningIds.size === 0
+              ) {
+                log.warn("ignoring foreign result (num_turns=0, no content this turn)", {
+                  sk,
+                  sessionId: msg.session_id,
+                  durationMs: msg.duration_ms,
+                  viaResume: usingResume,
+                })
+                armWatchdog()
+                return
+              }
 
               if (msg.session_id) {
                 setClaudeSessionId(sk, msg.session_id)

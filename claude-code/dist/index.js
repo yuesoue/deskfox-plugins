@@ -1261,6 +1261,14 @@ ${plan}
               }
             }
             if (msg.type === "result") {
+              if (msg.num_turns === 0 && !responseText && !thinkingText && toolCalls.length === 0) {
+                log.warn("ignoring foreign result (num_turns=0, no content this turn)", {
+                  sk,
+                  sessionId: msg.session_id,
+                  durationMs: msg.duration_ms
+                });
+                return;
+              }
               if (msg.session_id) {
                 setClaudeSessionId(sk, msg.session_id);
               }
@@ -1902,6 +1910,16 @@ ${plan}
             }
             if (msg.type === "result") {
               if (tryResumeRetry()) return;
+              if (msg.num_turns === 0 && !textStarted && toolCallsById.size === 0 && reasoningIds.size === 0) {
+                log.warn("ignoring foreign result (num_turns=0, no content this turn)", {
+                  sk,
+                  sessionId: msg.session_id,
+                  durationMs: msg.duration_ms,
+                  viaResume: usingResume
+                });
+                armWatchdog();
+                return;
+              }
               if (msg.session_id) {
                 setClaudeSessionId(sk, msg.session_id);
               }
@@ -2142,7 +2160,7 @@ ${plan}
 };
 
 // src/index.ts
-var PLUGIN_VERSION = "0.1.12";
+var PLUGIN_VERSION = "0.1.13";
 function createClaudeCode(settings = {}) {
   const cliPath = settings.cliPath ?? process.env.CLAUDE_CLI_PATH ?? "claude";
   const cwd = settings.cwd ?? process.cwd();

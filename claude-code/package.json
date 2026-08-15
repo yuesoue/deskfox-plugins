@@ -1,6 +1,6 @@
 {
   "name": "opencode-claude-code-plugin",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Claude Code CLI provider plugin for opencode",
   "type": "module",
   "main": "dist/index.js",

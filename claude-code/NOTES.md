@@ -348,8 +348,18 @@ doStream 流式 / B1 result-path 属集成行为,由真机实测覆盖,未做单
    顶部** 和 closeHandler 两处都调;配 spawnClaudeProcess exit handler 的**身份守卫**
    (`activeProcesses.get(key) === ap` 才 delete),防 B1 重起的同 key 新进程被老进程退出误删。(v0.1.9)
 
+3. **`result` 不一定属于本轮**:`--resume` 一个"上次结束时留有未完结后台任务"的会话时,claude 会
+   先给那条恢复通知补一个**空回合**再处理本轮消息,stdout 实测顺序是
+   `system task_notification → system init → result{num_turns:0,result:""} → system init(第二次)
+   → assistant(真正的回答) → result{num_turns:1}`。
+   → result 处理器一看到第 3 行就 `turnCompleted=true` 关流,真正的回答无处可去 → **UI 上是
+   "回车了没有任何反应"**(零 token / 无文本 / 无报错),而 CLI 那头照常把活干完(user 现场:
+   DeskFox 侧 1.4s 空回合,CLI 侧继续跑了 3 分半并改完文件)。
+   修法与判据取舍见 **§14**。(v0.1.13)
+
 **通用教训**:判断"resume 是否失败"的可靠信号是 **`usingResume && 从未收到 system init`**,
 而不是"进程怎么退出的"——因为 claude 失败有多种退出形态(静默 close / result{isError} / 非零 code)。
+**同理,收到 `result` 也不等于"本轮结束"**——先确认它属于本轮(见第 3 条)再关流。
 
 ### 11.7 为什么用 7 分钟 idle、而不是"会话结束信号"(已调研,决定不做 — 2026-06-06)
 
@@ -456,3 +466,73 @@ npm 装法的真实 exe 在包内:`%APPDATA%\npm\node_modules\@anthropic-ai\clau
 - 注入点决策:选**插件统一注入**(vs 项目 AGENTS/CLAUDE 指令)——全局零配置双端一致;措辞条件式,短任务命中不了任何条款,干扰可忽略(真机 probe 验证普通消息行为无变化)。
 - 第3档(between-turns 推送 / promptAsync / sessionID 注入)评估结论:**不做**,理由与重开条件见 OPENCODE-PLAN 需求池 REQ-090 doc 交付记录(核心:第1档把"自发后台产出"场景挖空;idle 豁免与 REQ-051 冲突;定时类正解在调度层)。
 - **逃生口**:环境变量 `OPENCODE_CLAUDE_CODE_NO_BRIDGE_PROMPT=1` 整体关闭桥接注入(禁工具 + 提示),排查"提示是否干扰行为"时用。
+
+## 14. resume 场景的「外来 result」→ 空回复静默(2026-08-15,v0.1.13)
+
+### 14.1 现场
+
+user 反馈"回车提交后没有任何反应,已是第二次"。DeskFox 侧证据(sidecar API + opencode 日志):
+
+- 用户消息正常落库,`15:11:06.196` 起流 `providerID=claude-code modelID=opus`;
+- `15:11:07.60`(**1.4 秒**)assistant 消息就结束:parts 只有 `step-start`/`step-finish`,
+  **零 token、无文本、无 error**,opencode 随即 `exiting loop` —— 整轮静默,UI 一片空白;
+- 但 CLI 那头(`~/.claude/projects/<escaped-cwd>/<uuid>.jsonl`)**收到了这条消息并干到 `15:14:46`**:
+  Read → 7 次 Edit → 跑校验 → 输出完整总结。**活干完了,只是回复没回流到界面。**
+
+### 14.2 复现(真 CLI,两轮)
+
+```bash
+# 第一轮: 造一个"结束时留有未完结后台任务"的会话
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"用 Bash 在后台启动 sleep 400,然后立刻回复 STARTED 结束回合"}}' \
+  | claude --output-format stream-json --input-format stream-json --verbose --dangerously-skip-permissions
+# 第二轮: --resume 它
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"只回复 OK"}}' \
+  | claude --output-format stream-json --input-format stream-json --verbose --resume <SID>
+```
+
+第二轮 stdout(claude 2.1.x 实测):
+
+```
+01 system task_notification
+02 system init
+03 result success  num_turns=0  duration=48ms  result=''   <- 外来 result
+04 system init                                             <- 第二次 init,这才开始本轮
+05 assistant  TXT:OK                                       <- 真正的回答
+06 result success  num_turns=1  duration=4691ms  result='OK'
+```
+
+**对照组**(resume 一个无遗留后台任务的干净会话)只有 `init → assistant → result{num_turns:1}`,
+没有第 03 行 → 触发条件锁定为「**resume + 上次留有未完结后台任务**」。
+
+### 14.3 触发链(为什么是间歇发作)
+
+会话空闲超 `IDLE_TIMEOUT_MS`(7min)→ 进程被回收 → 下条消息必走 `--resume`;
+被恢复的 CC 会话若留有未完结后台任务 → 外来 result → 空回复。
+`claudeSessions` 是**进程内内存 Map**,重启 DeskFox 即清空 → 下条走 fresh 不 resume → 当场不复现,
+所以看起来像"重装/重启修好了",其实只是躲开了触发条件。**重装插件对此无效**(dist 与 src 同源,
+`install.sh` 在 dist 存在时不重建,只重写 opencode.jsonc 里同一段配置)。
+
+### 14.4 修法
+
+`doStream` / `doGenerate` 的 result 处理器加"归属校验",命中则**忽略这条 result 继续等**:
+
+- 判据 = `num_turns === 0`(CLI 明说这个 turn 没有轮次)**且**本轮确实一点内容都没产出
+  (`doStream`: `!textStarted && toolCallsById.size===0 && reasoningIds.size===0`)。
+- **为什么双条件**:只看"无内容"会误伤「模型真的返回空回复」(那种 `num_turns>=1`),
+  一旦误判就不是空回复而是**流永不 finish**(进程留池、rl 不 close)——转圈卡死比空白更糟。
+- **安全网**:忽略后重新 `armWatchdog()`,万一之后再无任何事件,由既有 watchdog(§13.2)兜底
+  重建重发 / 给可见错误,不会静默挂死。
+- 位置在 `tryResumeRetry()` 之后:resume 彻底失败(从未 init)仍优先走 B1 转 fresh。
+
+### 14.5 回归测试
+
+`foreign-result.test.ts` + `fake-claude.cjs` 的 `FAKE_CLAUDE_MODE=foreign-result` 模式复刻上面
+6 行事件序列(真子进程,不花 token)。**做过红灯验证**:临时禁用判据后该用例收到的文本正是 `""`,
+与生产现场一致;恢复后 35 项全绿。第二个用例守住"普通回合(num_turns=1)照常收流"不被误伤。
+
+### 14.6 DeskFox 主仓侧的可选加固(未做,根因不在那)
+
+这类回合在 opencode 侧是彻底静默的:assistant 消息零 part、`finish=unknown`,`runLoop` 直接
+`exiting loop`,界面上既没有内容也没有错误。值得加"本回合零输出且无 error → 给可见提示"的兜底,
+否则将来任何 provider 出这类问题,表现都还是"回车了没反应"。另注:`processor` 把 `unknown` 当
+"未完成"、`runLoop` 却把非 `tool-calls` 当"已完成",两处判定本身也不一致。

@@ -3,6 +3,7 @@
 # 保证 marker 写入/分支判定发生在 watchdog 窗口内, 消除测试竞态。
 #   FAKE_CLAUDE_MODE=silent      → 永远沉默(模拟僵死/SIGSTOP 挂起进程)
 #   FAKE_CLAUDE_MODE=silent-once → 首启(marker 不存在)沉默; 被 watchdog 杀掉重启后正常应答
+#   FAKE_CLAUDE_MODE=foreign-result → 复刻 --resume 带未完结后台任务时的事件序列(见 .cjs)
 #   其他                          → 正常应答(交给 fake-claude.cjs)
 case "$FAKE_CLAUDE_MODE" in
   silent)
